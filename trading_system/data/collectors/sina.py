@@ -49,12 +49,18 @@ def fetch_snapshot(
     codes: "list[str]",
     base_url: str = "https://hq.sinajs.cn/list=",
     referer: str = "https://finance.sina.com.cn",
+    max_per_sec: float = 10.0,
 ) -> "list[dict]":
-    """批量取盘中快照(带 Referer 头;GBK 解码后交 parse_sina)。"""
+    """批量取盘中快照:自动按 ≤100 只/请求分批、全局 ≤max_per_sec 次/秒限频(带 Referer 头)。"""
     import requests
 
-    if len(codes) > 100:
-        raise ValueError("新浪快照单请求 ≤100 只(见 config/data.yaml realtime_rate_limit)")
-    resp = requests.get(base_url + ",".join(codes), headers={"Referer": referer}, timeout=5)
-    resp.encoding = "gbk"
-    return parse_sina(resp.text)
+    from trading_system.data.collectors._ratelimit import RateLimiter, chunked
+
+    limiter = RateLimiter(max_per_sec)
+    out: list[dict] = []
+    for batch in chunked(list(codes), 100):
+        limiter.wait()
+        resp = requests.get(base_url + ",".join(batch), headers={"Referer": referer}, timeout=5)
+        resp.encoding = "gbk"
+        out.extend(parse_sina(resp.text))
+    return out

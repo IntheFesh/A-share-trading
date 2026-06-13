@@ -21,6 +21,9 @@ def daily_rank_ic(
 ) -> pd.Series:
     """逐交易日的截面 RankIC(score 与 label 的秩相关 = 秩的 Pearson 相关)。返回按日 IC 序列。"""
 
+    if df.empty:
+        return pd.Series(dtype="float64")
+
     def _ic(g: pd.DataFrame) -> float:
         s, y = g[score_col], g[label_col]
         m = s.notna() & y.notna()
@@ -40,7 +43,8 @@ def icir(ic_series: pd.Series) -> float:
 
 
 def mean_rank_ic(df, score_col, label_col, **kw) -> float:
-    return float(daily_rank_ic(df, score_col, label_col, **kw).mean())
+    s = daily_rank_ic(df, score_col, label_col, **kw)
+    return float(s.mean()) if len(s) else float("nan")
 
 
 def blocked_rank_ic(
@@ -146,6 +150,20 @@ def deflated_sharpe_ratio(
     return probabilistic_sharpe_ratio(
         sharpe, n_obs, sr_benchmark=sr0, skew=skew, kurtosis=kurtosis
     )
+
+
+def cusum(series: "pd.Series | np.ndarray", *, threshold: "float | None" = None) -> dict:
+    """RankIC 的 CUSUM 漂移监控(v3.1 §13 核心)。返回去均值累积和、最大绝对偏移与是否越限。
+
+    s_t = Σ_{i<=t}(x_i - mean(x));|s| 越大表示均值持续偏离(如 RankIC 系统性转负)。
+    """
+    s = pd.Series(np.asarray(series, dtype="float64")).dropna()
+    if len(s) == 0:
+        return {"cumsum": np.array([]), "max_abs": float("nan"), "breach": None}
+    cs = (s - s.mean()).cumsum().to_numpy()
+    max_abs = float(np.abs(cs).max())
+    return {"cumsum": cs, "max_abs": max_abs,
+            "breach": (bool(max_abs > threshold) if threshold is not None else None)}
 
 
 def pbo_cscv(block_perf: "np.ndarray") -> float:

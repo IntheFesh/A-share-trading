@@ -26,6 +26,12 @@ class TestRankIC:
         ic2 = pd.Series([0.0, 0.2])  # mean 0.1, std(ddof1)=0.1414 -> icir≈0.707
         assert abs(metrics.icir(ic2) - (0.1 / pd.Series([0.0, 0.2]).std(ddof=1))) < 1e-9
 
+    def test_empty_or_all_nan_returns_nan(self):
+        # 全 NaN 特征(如缺 turn 的 CGO)-> 空截面 -> RankIC 应为 NaN 而非报错
+        empty = pd.DataFrame({"trade_date": [], "score": [], "label": []})
+        assert len(metrics.daily_rank_ic(empty, "score", "label")) == 0
+        assert np.isnan(metrics.mean_rank_ic(empty, "score", "label"))
+
     def test_blocked_subsamples(self):
         days = pd.date_range("2020-01-06", periods=10, freq="D")
         df = pd.concat([

@@ -67,20 +67,23 @@ def run(config: dict, *, start, end, param_grid: dict, use_blind_once: bool = Fa
     report = {"nominal_return": None, "net_return": None, "pbo": None, "pbo_warning": None,
               "note": "数值需带 score 的数据集;否则仅执行三纪律预检"}
     if dataset_df is not None and score_col in dataset_df.columns:
-        nominal, net, daily = naive_topk_backtest(dataset_df, score_col, top_k=top_k,
-                                                  cost_fraction=cost_fraction)
-        # PBO:把每日收益切成不重叠块,跨 top_k 变体(trial)构造块绩效矩阵
+        from trading_system.backtest.runner import walk_forward_backtest
+
+        # 用事件级引擎逐笔回测(完全体口径,与实盘一致)
+        res = walk_forward_backtest(dataset_df, score_col, top_k=top_k, cost_fraction=cost_fraction)
+        nominal, net = res["nominal_return"], res["net_return"]
+        # PBO:把每日扣费净收益切成不重叠块,跨 top_k 变体(trial)构造块绩效矩阵
         trials = [max(1, top_k // 2), top_k, top_k + 5]
         blocks = 8
         mats = []
         for tk in trials:
-            _, _, d = naive_topk_backtest(dataset_df, score_col, top_k=tk, cost_fraction=cost_fraction)
+            d = walk_forward_backtest(dataset_df, score_col, top_k=tk,
+                                      cost_fraction=cost_fraction)["net_daily"]
             if len(d) >= blocks:
-                mats.append([seg.mean() for seg in np.array_split(d - cost_fraction, blocks)])
+                mats.append([seg.mean() for seg in np.array_split(d, blocks)])
         if len(mats) >= 2:
-            block_perf = np.array(mats).T  # (blocks, trials)
             report = assemble_backtest_report(
-                nominal_return=nominal, net_return=net, block_perf=block_perf,
+                nominal_return=nominal, net_return=net, block_perf=np.array(mats).T,
                 pbo_warn_threshold=config["backtest"]["pbo_warn_threshold"])  # 纪律二
         else:
             report.update(nominal_return=nominal, net_return=net,

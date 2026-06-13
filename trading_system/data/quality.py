@@ -132,12 +132,25 @@ def check_disclosure_fields(panel: pd.DataFrame, window: int = 10) -> CheckResul
     )
 
 
+def check_adj_factor_monotonic(panel: pd.DataFrame, tol: float = 1e-9) -> CheckResult:
+    """后复权因子单调性:同一只票的 adj_factor 应随时间非递减(后复权随分红累积上调);
+    出现下降疑为数据错误。无除权时不变。"""
+    flagged = 0
+    for _, g in panel.sort_values(["code", "trade_date"]).groupby("code", sort=False):
+        f = g["adj_factor"].to_numpy(dtype="float64")
+        flagged += int((np.diff(f) < -tol).sum())
+    if flagged == 0:
+        return CheckResult("adj_factor_monotonic", PASS, 0, "后复权因子非递减")
+    return CheckResult("adj_factor_monotonic", WARN, flagged, f"{flagged} 处后复权因子下降(疑数据错)")
+
+
 def run_daily_quality_checks(panel: pd.DataFrame) -> "list[CheckResult]":
     """运行全部质检项,返回结果列表。"""
     return [
         check_raw_adj_separation(panel),
         check_limit_price_consistency(panel),
         check_adj_continuity(panel),
+        check_adj_factor_monotonic(panel),
         check_one_price_consistency(panel),
         check_suspension_consistency(panel),
         check_disclosure_fields(panel),

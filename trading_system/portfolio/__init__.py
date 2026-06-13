@@ -19,6 +19,26 @@ def kelly_risk_budget(f_star: float, *, r0: float = 0.005, s: float = 1.0) -> fl
     return r0 * s if f_star > 0 else 0.0
 
 
+def estimate_sigma_hat(
+    returns, *, short: int = 20, long: int = 60, periods_per_year: int = 252,
+    w_short: float = 0.5, w_long: float = 0.5,
+) -> float:
+    """波动率估计 σ̂ = sqrt(w_s·σ_short² + w_l·σ_long²) × √年化(v3.1 §10.3,0.5/0.5 待自验)。
+
+    σ_short/σ_long 为近 short/long 日收益的样本标准差。用 adj 收益(特征侧)。
+    """
+    import numpy as np
+
+    r = np.asarray(returns, dtype="float64")
+    r = r[~np.isnan(r)]
+    if len(r) < short:
+        return float("nan")
+    s_short = float(np.std(r[-short:], ddof=1))
+    s_long = float(np.std(r[-long:], ddof=1)) if len(r) >= long else s_short
+    daily = np.sqrt(w_short * s_short ** 2 + w_long * s_long ** 2)
+    return float(daily * np.sqrt(periods_per_year))
+
+
 def total_exposure(
     *,
     sigma_star: float,

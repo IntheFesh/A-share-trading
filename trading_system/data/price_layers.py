@@ -63,6 +63,8 @@ def build_price_layers(
     if "is_st" not in out.columns:
         out["is_st"] = False
     out["is_st"] = out["is_st"].astype(bool)
+    if "turn" not in out.columns:        # 换手率(特征层附加;无来源时 NaN)
+        out["turn"] = np.nan
 
     # ── 特征层:后复权 = 原始价 × 复权因子 ──
     factor = out[ADJ_FACTOR_FIELD].to_numpy(dtype="float64")

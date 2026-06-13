@@ -48,12 +48,21 @@ def parse_tencent(text: str) -> "list[dict]":
     return out
 
 
-def fetch_snapshot(codes: "list[str]", base_url: str = "https://qt.gtimg.cn/q=") -> "list[dict]":
-    """批量取盘中快照(GBK 解码后交 parse_tencent)。codes 形如 ['sh600519','sz000001']。"""
+def fetch_snapshot(codes: "list[str]", base_url: str = "https://qt.gtimg.cn/q=",
+                   max_per_sec: float = 10.0) -> "list[dict]":
+    """批量取盘中快照:自动按 ≤100 只/请求分批、全局 ≤max_per_sec 次/秒限频;GBK 解码后解析。
+
+    codes 形如 ['sh600519','sz000001']。限频/分批见 config/data.yaml realtime_rate_limit。
+    """
     import requests
 
-    if len(codes) > 100:
-        raise ValueError("腾讯快照单请求 ≤100 只(见 config/data.yaml realtime_rate_limit)")
-    resp = requests.get(base_url + ",".join(codes), timeout=5)
-    resp.encoding = "gbk"
-    return parse_tencent(resp.text)
+    from trading_system.data.collectors._ratelimit import RateLimiter, chunked
+
+    limiter = RateLimiter(max_per_sec)
+    out: list[dict] = []
+    for batch in chunked(list(codes), 100):
+        limiter.wait()
+        resp = requests.get(base_url + ",".join(batch), timeout=5)
+        resp.encoding = "gbk"
+        out.extend(parse_tencent(resp.text))
+    return out
