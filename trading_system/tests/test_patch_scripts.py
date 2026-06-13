@@ -222,6 +222,10 @@ class TestPredictEndToEnd:
                                      print_console=False)
         assert info["model_train_end"] == "2020-02-20"
         assert len(table) > 0 and "limit_buy_price" in table.columns and "stop_price" in table.columns
+        # 仓位参考指标已计算并填充(批1B)
+        for col in ("atr_n", "single_cap_pct", "kelly_suggest_pct", "stop_distance_pct", "amihud_illiq"):
+            assert col in table.columns
+        assert table["atr_n"].notna().any() and table["stop_distance_pct"].notna().any()
 
 
 # ── 脚本可导入 + 读 config(单一源贯通)──────────────────────────────────────

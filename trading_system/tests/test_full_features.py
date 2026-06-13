@@ -211,6 +211,28 @@ class TestWalkForward:
         assert res["n_trades"] > 0
         assert np.isfinite(res["net_return"]) and res["net_return"] <= res["nominal_return"] + 1e-9
 
+    def test_weighted_differs_from_equal(self):
+        # 5 只票各以不同恒定日收益生成;score=按 code 序固定,保证 top-3 名次稳定且收益各异
+        cal = synthetic.make_calendar("2020-01-06", 40)
+        rets = {f"60000{i}": (i - 2) * 0.004 for i in range(5)}
+        rows = []
+        for code, r in rets.items():
+            closes = 10.0 * np.cumprod(np.full(len(cal.dates), 1.0 + r))
+            for j, d in enumerate(cal.dates):
+                pc = 10.0 if j == 0 else closes[j - 1]
+                rows.append(dict(code=code, trade_date=pd.Timestamp(d), open_raw=pc,
+                                 high_raw=max(pc, closes[j]), low_raw=min(pc, closes[j]),
+                                 close_raw=closes[j], preclose_raw=pc, volume=1e4,
+                                 amount=1e4 * closes[j], adj_factor=1.0))
+        panel = pl.build_price_layers(pd.DataFrame(rows))
+        panel["__score__"] = panel["code"].map({c: r for c, r in rets.items()})  # 名次稳定
+        eq = walk_forward_backtest(panel, "__score__", top_k=3, cost_fraction=0.001)
+        wt = walk_forward_backtest(panel, "__score__", top_k=3, weights=[0.5, 0.3, 0.2],
+                                   cost_fraction=0.001)
+        assert eq["n_trades"] > 0 and wt["n_trades"] > 0
+        assert np.isfinite(eq["net_return"]) and np.isfinite(wt["net_return"])
+        assert abs(eq["net_return"] - wt["net_return"]) > 1e-9   # 加权与等权结果不同
+
 
 # ── 质检新项 ────────────────────────────────────────────────────────────────
 class TestQualityMonotonic:

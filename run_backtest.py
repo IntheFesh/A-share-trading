@@ -64,16 +64,22 @@ def run(config: dict, *, start, end, param_grid: dict, use_blind_once: bool = Fa
     cost_fraction = (cost["stamp_duty"] + 2 * cost["exchange_fee"] + 2 * cost["transfer_fee"]
                      + 2 * cost["commission_rate"])
 
+    # 回测前 N 名与权重均从 config 读(请勿在此硬改)
+    top_n = int(config["backtest"].get("top_n", top_k))
+    pw = config["backtest"].get("position_weights", "equal")
+    weights = pw if isinstance(pw, list) else None
+
     report = {"nominal_return": None, "net_return": None, "pbo": None, "pbo_warning": None,
               "note": "数值需带 score 的数据集;否则仅执行三纪律预检"}
     if dataset_df is not None and score_col in dataset_df.columns:
         from trading_system.backtest.runner import walk_forward_backtest
 
         # 用事件级引擎逐笔回测(完全体口径,与实盘一致)
-        res = walk_forward_backtest(dataset_df, score_col, top_k=top_k, cost_fraction=cost_fraction)
+        res = walk_forward_backtest(dataset_df, score_col, top_k=top_n, weights=weights,
+                                    cost_fraction=cost_fraction)
         nominal, net = res["nominal_return"], res["net_return"]
-        # PBO:把每日扣费净收益切成不重叠块,跨 top_k 变体(trial)构造块绩效矩阵
-        trials = [max(1, top_k // 2), top_k, top_k + 5]
+        # PBO:把每日扣费净收益切成不重叠块,跨 top_k 变体(trial,等权)构造块绩效矩阵
+        trials = [max(1, top_n // 2), top_n, top_n + 5]
         blocks = 8
         mats = []
         for tk in trials:

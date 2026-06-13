@@ -23,6 +23,12 @@ PLAYBOOK_COLUMNS: tuple[str, ...] = (
     "limit_buy_price", "shares", "target_weight_pct",
     "stop_price", "tp1_price", "tp2_price", "tp3_price", "time_stop_date",
     "veto_reason",
+    # 仓位参考指标(系统计算的客观参考;仓位由用户结合风险承受与临场判断自定)
+    "atr_n",              # ATR(N)波动幅度;波动越大单笔应买越少
+    "single_cap_pct",     # 按 INV-5 的单股上限 w_max(主板 8%/特殊 5%),%
+    "kelly_suggest_pct",  # 按信号方向的凯利建议风险预算,%
+    "stop_distance_pct",  # (限价买入价-止损价)/限价买入价,即单笔最大亏损比例 %;可反推仓位
+    "amihud_illiq",       # Amihud 非流动性;极差流动性即便小资金也要警惕
     # 风险标注
     "days_to_disclosure", "has_preann", "pledge_high", "goodwill_high",
     "recent_regulatory_letter", "overextension_score", "hilo_regime",

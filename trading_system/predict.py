@@ -47,6 +47,7 @@ def run_prediction(
     from trading_system.model.model_io import assert_feature_consistency, load_model
     from trading_system.model.train import predict_scores
     from trading_system.playbook import generate_playbook
+    from trading_system import portfolio as port
 
     card = load_model(model_path)
     features = list(config["features"])
@@ -78,18 +79,32 @@ def run_prediction(
         g = panel[panel["code"] == code].sort_values("trade_date")
         atr = float(compute_atr(g, 14).iloc[-1]) if len(g) >= 15 else np.nan
         close = float(r["close_raw"])
+        score = float(r["__score__"])
         risk = stop_mult * atr if np.isfinite(atr) else np.nan
+        stop_price = round(close - risk, 2) if np.isfinite(risk) and close > 0 else None
+        # 仓位参考指标
+        stop_distance_pct = (round((close - stop_price) / close * 100.0, 2)
+                             if stop_price is not None and close > 0 else None)
+        kelly_pct = round(port.kelly_risk_budget(score) * 100.0, 4)  # 按信号方向(score>0)
+        amihud = ((g["close_adj"].pct_change().abs() / g["amount"].replace(0, np.nan))
+                  * 1e9).rolling(20).mean()
+        amihud_illiq = float(amihud.iloc[-1]) if len(amihud) and np.isfinite(amihud.iloc[-1]) else None
         rows.append({
-            "code": code, "trigger": None, "model_score": round(float(r["__score__"]), 4),
+            "code": code, "trigger": None, "model_score": round(score, 4),
             "rank": int(r["rank"]), "limit_buy_price": close,
             "target_weight_pct": cap,
-            "stop_price": round(close - risk, 2) if np.isfinite(risk) else None,
+            "stop_price": stop_price,
             "tp1_price": round(close + risk, 2) if np.isfinite(risk) else None,
             "tp2_price": round(close + 2 * risk, 2) if np.isfinite(risk) else None,
             "tp3_price": None,
             "time_stop_date": str(np.busday_offset(asof.date(),
                                   int(config["risk"]["max_holding_days"]), roll="forward")),
             "veto_reason": None,
+            "atr_n": round(atr, 4) if np.isfinite(atr) else None,
+            "single_cap_pct": cap,
+            "kelly_suggest_pct": kelly_pct,
+            "stop_distance_pct": stop_distance_pct,
+            "amihud_illiq": amihud_illiq,
             "days_to_disclosure": r.get("days_to_disclosure"),
             "has_preann": r.get("has_preann"),
         })

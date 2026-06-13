@@ -69,3 +69,30 @@ champion_challenger:
 backtest:
   max_param_combos: 50              # 粗桶参数组合上限,超过报错(禁止精细网格)
   pbo_warn_threshold: 0.30          # PBO 超此值在报告中标红警告
+  top_n: 20                         # 回测每日买入预测排名前 N 名;N 小=贴近实操但高方差,
+                                    # N 大=衡量信号整体质量。用户实操可设 3,看信号质量设 20
+  position_weights: "equal"         # 前 N 名的权重分配:"equal"=等权;或给列表如 [0.5,0.3,0.2]
+                                    # 表示第1/2/3名权重(列表长度需=top_n;和不必为1,按总敞口归一)
+  position_mode: "equal"            # 回测仓位模式:"equal"=等权(默认);"risk"=portfolio风控(批4实装)
+
+# === 训练侧(新功能默认关闭/维持原行为)===
+training:
+  route: "C"                        # 默认标签路线;A=秩回归 B=净收益回归 C=lambdarank分位
+  compare_routes: false             # 是否训练全部 A/B/C 并输出 RankIC 对比;默认关
+  time_decay:
+    enabled: false                  # 时间衰减样本权重总开关;默认关,确保不开时行为不变
+    half_life_candidates: [250, 500, 750]   # 候选半衰期(交易日,≈1/2/3年);
+                                    # baseline 后用样本外 RankIC 对比择稳健者,选定后冻结
+    half_life_active: 500           # 当前启用的半衰期;先验默认2年,选定后改这里冻结
+                                    # 依据:A股风格周期约1.5-3年;w=0.5^((t_end-t_i)/H)
+  cache:
+    enabled: true                   # 特征/标签缓存开关;默认开,加速重训(批2实装)
+    cache_dir: "./train_cache"      # 缓存落盘目录(已加入 .gitignore)
+  tune:
+    enabled: false                  # Optuna 超参搜索开关;默认关。baseline 后再人工开启
+    n_trials: 30                    # 试验次数(粗调,不要精细网格);受 max_param_combos 精神约束
+  label:
+    type: "fixed_h"                 # 标签类型:"fixed_h"=固定窗(现状,快);
+                                    # "engine"=引擎版动态出场净收益(对齐实际交易,慢,需缓存)
+    fixed_horizon: 5                # type=fixed_h 时的持有窗(交易日)
+                                    # type=engine 时用 risk.max_holding_days(25)等出场参数

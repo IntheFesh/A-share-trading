@@ -25,14 +25,18 @@ def walk_forward_backtest(
     atr_mult: float = 2.5,
     trail_c: float = 2.5,
     max_holding: int = 10,
+    weights: "list | None" = None,
 ) -> dict:
-    """逐日 top-K + 引擎逐笔回测。返回 trades / 信号日净收益 / 名义与扣费收益 / 净值。"""
+    """逐日 top-K + 引擎逐笔回测。返回 trades / 信号日净收益 / 名义与扣费收益 / 净值。
+
+    weights=None 时前 N 名等权(与历史行为完全一致);传入列表则按名次加权(第 i 名权重 weights[i],
+    超出列表长度的名次权重 0),按已成交名次归一。
+    """
     p = panel.sort_values(["code", "trade_date"]).copy()
     by_code = {code: g.reset_index(drop=True) for code, g in p.groupby("code", sort=False)}
     atr_by_code = {code: compute_atr(g, atr_period) for code, g in by_code.items()}
 
-    day_net: dict = {}
-    day_gross: dict = {}
+    day_rows: dict = {}  # date -> [(rank_i, net, gross), ...]
     trades = []
     for date, day in p.groupby("trade_date", sort=True):
         cand = day.dropna(subset=[score_col])
@@ -41,7 +45,7 @@ def walk_forward_backtest(
         if cand.empty:
             continue
         top = cand.nlargest(min(top_k, len(cand)), score_col)
-        for code in top["code"]:
+        for rank_i, code in enumerate(top["code"]):
             g = by_code[code]
             pos_idx = g.index[g["trade_date"] == date]
             if len(pos_idx) == 0:
@@ -54,12 +58,20 @@ def walk_forward_backtest(
                                  max_holding=max_holding, cost_fraction=cost_fraction)
             if res.status == "closed":
                 trades.append(res)
-                day_net.setdefault(date, []).append(res.net_return)
-                day_gross.setdefault(date, []).append(res.gross_return)
+                day_rows.setdefault(date, []).append((rank_i, res.net_return, res.gross_return))
 
-    dates = sorted(day_net)
-    net_daily = np.array([float(np.mean(day_net[d])) for d in dates], dtype="float64")
-    gross_daily = np.array([float(np.mean(day_gross[d])) for d in dates], dtype="float64")
+    def _wmean(rows, idx):
+        if weights is not None:
+            w = np.array([weights[i] if i < len(weights) else 0.0 for i, _, _ in rows], dtype="float64")
+        else:
+            w = np.ones(len(rows), dtype="float64")
+        vals = np.array([r[idx] for r in rows], dtype="float64")
+        wsum = w.sum()
+        return float((w * vals).sum() / wsum) if wsum > 0 else float("nan")
+
+    dates = [d for d in sorted(day_rows) if np.isfinite(_wmean(day_rows[d], 1))]
+    net_daily = np.array([_wmean(day_rows[d], 1) for d in dates], dtype="float64")
+    gross_daily = np.array([_wmean(day_rows[d], 2) for d in dates], dtype="float64")
     net_nav = np.cumprod(1.0 + net_daily) if len(net_daily) else np.array([])
     return {
         "n_trades": len(trades),
