@@ -27,6 +27,9 @@ ADJ_PRICE_FIELDS: tuple[str, ...] = (
     "close_adj",
 )
 
+# 特征层附加列(换手率;来自 BaoStock 日线,服务换手率族与 CGO 族)。无来源时为 NaN。
+FEATURE_EXTRA_FIELDS: tuple[str, ...] = ("turn",)
+
 # 状态位
 STATE_FIELDS: tuple[str, ...] = (
     "is_suspended",
@@ -59,6 +62,7 @@ PRICE_LAYER_FIELDS: tuple[str, ...] = (
     *VOLUME_FIELDS,
     ADJ_FACTOR_FIELD,
     *ADJ_PRICE_FIELDS,
+    *FEATURE_EXTRA_FIELDS,
     *STATE_FIELDS,
 )
 

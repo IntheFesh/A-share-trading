@@ -21,14 +21,16 @@ import pandas as pd
 
 from trading_system.data.schema import (
     ADJ_PRICE_FIELDS,
+    FEATURE_EXTRA_FIELDS,
     KEY_FIELDS,
     STATE_FIELDS,
     VOLUME_FIELDS,
 )
 
-#: 特征函数只能看到的列:后复权价 + 量额 + 状态位 + key。绝不含原始价(*_raw)与前复权 —— 检查三。
+#: 特征函数只能看到的列:后复权价 + 量额 + 换手 + 状态位 + key。绝不含原始价(*_raw)与前复权 —— 检查三。
 ALLOWED_FEATURE_COLUMNS: set[str] = (
-    set(KEY_FIELDS) | set(ADJ_PRICE_FIELDS) | set(VOLUME_FIELDS) | set(STATE_FIELDS)
+    set(KEY_FIELDS) | set(ADJ_PRICE_FIELDS) | set(VOLUME_FIELDS)
+    | set(FEATURE_EXTRA_FIELDS) | set(STATE_FIELDS)
 )
 
 #: 检查一:静态扫描的禁用模式。

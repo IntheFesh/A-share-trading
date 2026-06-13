@@ -29,6 +29,7 @@ __all__ = [
     "is_tradeable_fill",
     "build_y_h",
     "build_y_prod",
+    "build_y_prod_engine",
     "build_y_mtm0",
 ]
 
@@ -98,6 +99,41 @@ def build_y_prod(
         panel, holding_days, cost=cost, gap_threshold=gap_threshold,
         namespace=PRODUCTION_NAMESPACE,
     )
+
+
+def build_y_prod_engine(
+    panel: pd.DataFrame,
+    *,
+    atr_period: int = 14,
+    cost_fraction: float = 0.0,
+    atr_mult: float = 2.5,
+    trail_c: float = 2.5,
+    max_holding: int = 10,
+    gap_threshold: float = DEFAULT_GAP_ABANDON,
+) -> pd.Series:
+    """生产可交易标签(完全体):用事件级引擎的完整出场状态机(硬止损/止盈阶梯/跟踪/时间止损、
+    T+1、涨跌停顺延)逐信号模拟,标签 = 该笔扣费净收益(不可成交记 NaN)。对应 v3.1 第三/十一章。
+
+    这是 y_prod 的引擎版(区别于固定持有的 build_y_prod);与回测引擎同源,保证标签—回测一致(INV-3)。
+    价格层:成交/PnL 全用 raw(INV-2)。逐 (code,t) 调用 simulate_trade,计算量较大,生产中按需缓存。
+    """
+    from trading_system.backtest.engine import compute_atr, simulate_trade
+
+    p = panel.sort_values(["code", "trade_date"]).copy()
+    y = pd.Series(np.nan, index=p.index, dtype="float64")
+    for _, g in p.groupby("code", sort=False):
+        gg = g.reset_index()  # 保留原始 index 于列 'index'
+        atr = compute_atr(gg, atr_period).to_numpy(dtype="float64")
+        for pos in range(len(gg)):
+            if not np.isfinite(atr[pos]) or atr[pos] <= 0:
+                continue
+            res = simulate_trade(
+                gg, pos, atr=float(atr[pos]), atr_mult=atr_mult, trail_c=trail_c,
+                max_holding=max_holding, gap_threshold=gap_threshold, cost_fraction=cost_fraction,
+            )
+            if res.status == "closed":
+                y.loc[gg.loc[pos, "index"]] = res.net_return
+    return y
 
 
 def build_y_mtm0(panel: pd.DataFrame) -> pd.Series:

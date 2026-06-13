@@ -65,3 +65,27 @@ def elasticnet_baseline(
     sub["__pred__"] = model.predict(X)
     ic = mean_rank_ic(sub, "__pred__", label_col, date_col=date_col)
     return ic, model.coef_
+
+
+def lightgbm_regression_baseline(
+    df: pd.DataFrame,
+    feature_cols: "list[str]",
+    label_col: str,
+    *,
+    date_col: str = "trade_date",
+    params: "dict | None" = None,
+) -> "tuple[float, object]":
+    """④ LightGBM 回归基线:复杂模型须同时战胜本基线方可成为 challenger(v3.1 §7.1)。
+
+    返回 (预测分的 mean RankIC, 模型)。同窗拟合的参照;正式样本外评估走 Phase 3 purged walk-forward。
+    """
+    import lightgbm as lgb
+
+    from trading_system.model.train import DEFAULT_LGB_PARAMS
+
+    sub = df.dropna(subset=[*feature_cols, label_col]).copy()
+    model = lgb.LGBMRegressor(**{**DEFAULT_LGB_PARAMS, **(params or {})})
+    model.fit(sub[feature_cols], sub[label_col])
+    sub["__pred__"] = model.predict(sub[feature_cols])
+    ic = mean_rank_ic(sub, "__pred__", label_col, date_col=date_col)
+    return ic, model

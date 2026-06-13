@@ -74,6 +74,25 @@ def dr_value(
     return float(np.mean(qg + indicator / pb * (r - qt)))
 
 
+def hcope_lower_bound(per_sample_values: "np.ndarray", *, delta: float = 0.05) -> float:
+    """HCOPE 高置信下界(Thomas 2015 精神;经验 Bernstein 不等式)。
+
+    per_sample_values 为逐样本的重要性加权奖励 g_i(= 1{a=π_target}/π_b · r);返回否决策略价值的
+    (1-delta) 置信下界。需"有把握地证明否决没毁价值"时用本下界(下界>0 才算证据)。样本越多越紧。
+    """
+    x = np.asarray(per_sample_values, dtype="float64")
+    n = len(x)
+    if n < 2:
+        return float("nan")
+    m = float(x.mean())
+    s = float(x.std(ddof=1))
+    rng = float(x.max() - x.min())
+    ln = np.log(2.0 / delta)
+    # Maurer–Pontil 经验 Bernstein:LB = mean - s·sqrt(2ln/n) - 7·range·ln/(3(n-1))
+    eb = s * np.sqrt(2.0 * ln / n) + 7.0 * rng * ln / (3.0 * (n - 1))
+    return m - eb
+
+
 def algorithm_aversion_check(
     model_was_wrong: "np.ndarray", human_vetoed: "np.ndarray", *, ratio_threshold: float = 1.5
 ) -> dict:

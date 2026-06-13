@@ -174,10 +174,13 @@ def simulate_trade(
                 pending = (remaining, "time")
         d += 1
 
-    # 数据耗尽仍有持仓:按最后收盘 mark-to-market 了结
+    # 数据耗尽仍有持仓:按最后收盘 mark-to-market 了结。
+    # 但出场最早只能在 t+2(=e+1):若剩余数据不足以构成合法出场(信号太靠近数据末端),
+    # 则不成交(no_exit_data),绝不强行在 < t+2 处了结而违反 INV-1。
     if remaining > 1e-9:
         last = n - 1
-        fills.append(Fill(last, remaining, float(c[last]), "eod"))
+        if last >= e + 1:
+            fills.append(Fill(last, remaining, float(c[last]), "eod"))
 
     if not fills:
         return TradeResult("no_exit_data", t, entry_idx=e, entry_price=entry)

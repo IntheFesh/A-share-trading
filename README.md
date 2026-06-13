@@ -39,7 +39,7 @@ Phase 0 至 Phase 4 的全部逻辑、五个入口脚本与配置中心均已实
 或可手工核算的期望值为基准进行校验。
 
 ```
-198 passed, 3 skipped
+217 passed, 3 skipped
 ```
 
 测试覆盖区分两类验收口径:
@@ -313,6 +313,7 @@ pytest -W error::UserWarning                        # 将警告视为错误
 | `test_phase4.py` | OPE(IPW / DR)、否决理由码、算法厌恶护栏、作战手册、监控落盘 |
 | `test_fetch_training_data.py` | 采集开关、Tushare 降级、BaoStock 硬失败、增量去重、双价格层、PIT 语义 |
 | `test_patch_scripts.py` | 配置单一源、模型出生证明、embargo 断言、盲测一次性、回测三数、粗桶上限、冠军挑战者、时间戳命名 |
+| `test_full_features.py` | 实验注册表(SQLite)、HMM regime、CGO / 换手族、LightGBM 基线、σ̂ / CUSUM / HCOPE、监控增强层、限频、引擎版 y_prod、walk-forward 回测、质检新项 |
 
 ---
 
@@ -334,15 +335,15 @@ trading_system/
 ├── config/                    # 各类"待自验"阈值(逻辑中禁止硬编码)
 ├── data/                      # Phase 0:数据底座(schema/日历/双价格层/交易池/存储/质检/采集器)
 ├── features/                  # Phase 1:指标注册表(防泄漏三检查)与特征族
-├── regime/                    # Phase 1:L0 六指标、情绪温度、五阶段、HiLo
+├── regime/                    # Phase 1:L0 六指标、情绪温度、五阶段、HiLo;HMM 状态概率(hmm.py)
 ├── triggers/                  # Phase 1:L1 触发器(粗桶)
-├── labels/                    # Phase 1:三类标签
-├── backtest/                  # Phase 2:引擎、成本、基线、指标、压力、回测三纪律
+├── labels/                    # Phase 1:三类标签(含引擎版 y_prod)
+├── backtest/                  # Phase 2:引擎、成本、基线、指标、压力、回测三纪律、walk-forward 运行器(runner.py)
 ├── portfolio/                 # Phase 2:L3 仓位合成
 ├── overlays/                  # Phase 2:披露季 overlay、高低切交互
 ├── model/                     # Phase 3:purged CV、LightGBM、Optuna、审批、出生证明(model_io)
 ├── playbook/                  # Phase 4:作战手册
-├── audit/                     # Phase 4:否决审计(OPE)
+├── audit/                     # Phase 4:否决审计(OPE、HCOPE)、实验注册表(SQLite,experiment_registry)
 ├── reports/                   # 落盘报告与监控
 ├── tests/                     # 单元测试
 └── run/                       # 各 Phase 验收脚本
@@ -435,13 +436,12 @@ sched_disclosure_date, has_preann, preann_sign, days_to_disclosure      # 披露
 
 ## 15. 已知限制
 
-- 当前内置特征为代表性子集(12 项)。CGO 与换手率族需流通股本数据,现有数据表暂未包含,待补齐后接入。
-- L0 的 HMM 状态概率为 v3.1 标注的增强可选项,尚未实现。
-- Phase 1 的生产标签 `y_prod` 为"固定持有期 + 扣费"的可交易收益;含完整止损 / 止盈状态机的版本由
-  Phase 2 事件级引擎承担。
-- 次新股 60 日窗口当前以面板内计数近似;精确判定需 BaoStock `query_stock_basic` 的上市日字段(已就位,待接入)。
-- 采集器与冠军挑战者影子调度的网络 / 逐日实盘路径需实盘环境验证;离线测试以注入式 mock 与构造数据覆盖其逻辑。
-- regime 拐点、踩踏时点与无预告突发事件本质上不可提前精确预测;系统以事前纪律应对,而非事中预判。
+- 真实数据采集(BaoStock 行情 / Tushare 财报)与各 Phase 的真实市场验收需实盘环境与凭证,标记为
+  「未执行(NOT RUN)」;相关逻辑(采集编排、双价格层、特征、引擎、模型、回测、冠军挑战者)均以注入式
+  mock 与构造数据离线覆盖。CGO 与换手率族依赖 BaoStock 的 `turn` 字段,实盘取数后自动可用。
+- 次新股 60 日窗口当前以面板内计数近似;精确判定可接入 BaoStock `query_stock_basic` 的上市日字段(接口已就位)。
+- HMM 状态概率仅使用因果滤波(滤波天然滞后;平滑用了未来,不可上线);regime 拐点、踩踏时点与无预告
+  突发事件本质上不可提前精确预测,系统以事前纪律应对,而非事中预判。
 
 ---
 

@@ -103,6 +103,7 @@ def fetch_raw_with_factor(code: str, start: str, end: str):
             "preclose_raw": merged["preclose"],
             "volume": merged["volume"],
             "amount": merged["amount"],
+            "turn": merged["turn"] if "turn" in merged.columns else np.nan,  # 换手率(CGO/换手族)
             "adj_factor": factor,
             # PIT 历史 ST 状态:决定 5% 涨跌停(build_price_layers 会用到 is_st)
             "is_st": (merged["isST"].astype(str) == "1") if "isST" in merged.columns else False,

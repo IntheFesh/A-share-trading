@@ -89,3 +89,57 @@ def dist_ma20(g: pd.DataFrame) -> pd.Series:
 def dist_high_20(g: pd.DataFrame) -> pd.Series:
     """距 20 日最高收盘的距离(<=0;越接近 0 越接近新高=越拉升)。"""
     return g["close_adj"] / g["close_adj"].rolling(20).max() - 1.0
+
+
+# ── 换手率族(用 BaoStock turn;无换手数据时为 NaN)──────────────────────────
+@register("turnover_mean_20", "换手率", lookback=20)
+def turnover_mean_20(g: pd.DataFrame) -> pd.Series:
+    """20 日平均换手率。"""
+    return g["turn"].rolling(20).mean()
+
+
+@register("turnover_chg_20", "换手率", lookback=20)
+def turnover_chg_20(g: pd.DataFrame) -> pd.Series:
+    """当日换手相对过去 20 日均值的变化(放量/缩量倾向)。"""
+    return g["turn"] / g["turn"].shift(1).rolling(20).mean() - 1.0
+
+
+# ── CGO 族(Grinblatt–Han 资本利得突出量;换手率衰减加权参考价)──────────────
+def _cgo(g: pd.DataFrame, window: int) -> pd.Series:
+    """CGO = (P_t - RP_t)/P_t,RP_t 为换手率衰减加权的参考成本价(只用过去,point-in-time)。
+
+    RP_t = Σ_{k=1..n} w_{t,k}·P_{t-k},w_{t,k} = V_{t-k}·Π_{j=1..k-1}(1-V_{t-j}),归一化;
+    V 为换手率(turn/100,截断到 [0,1])。换手缺失则该行为 NaN。服务疑问②"切高位浮盈股"。
+    """
+    p = g["close_adj"].to_numpy(dtype="float64")
+    v = np.clip(g["turn"].to_numpy(dtype="float64") / 100.0, 0.0, 1.0)
+    n = len(g)
+    rp = np.full(n, np.nan)
+    for t in range(n):
+        lo = max(0, t - window)
+        num = wsum = 0.0
+        remain = 1.0
+        ok = True
+        for k in range(1, t - lo + 1):
+            vk = v[t - k]
+            if np.isnan(vk) or np.isnan(p[t - k]):
+                ok = False
+                break
+            w = vk * remain
+            num += w * p[t - k]
+            wsum += w
+            remain *= (1.0 - vk)
+        rp[t] = (num / wsum) if (ok and wsum > 0) else np.nan
+    return pd.Series((p - rp) / p, index=g.index)
+
+
+@register("cgo_60", "CGO", lookback=60)
+def cgo_60(g: pd.DataFrame) -> pd.Series:
+    """60 日窗口的资本利得突出量。"""
+    return _cgo(g, 60)
+
+
+@register("cgo_120", "CGO", lookback=120)
+def cgo_120(g: pd.DataFrame) -> pd.Series:
+    """120 日窗口的资本利得突出量。"""
+    return _cgo(g, 120)

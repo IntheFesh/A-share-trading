@@ -31,6 +31,10 @@ features:
   - max_ret_5
   - dist_ma20
   - dist_high_20
+  - turnover_mean_20    # 换手率族(需 BaoStock turn)
+  - turnover_chg_20
+  - cgo_60              # CGO 族(换手率衰减加权参考价;服务疑问②"切高位浮盈股")
+  - cgo_120
 
 # === 成本参数(Phase 0 据交割单核实后回填)===
 cost:
