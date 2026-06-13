@@ -78,6 +78,36 @@ trading_system/
 
 运行期 Parquet 数据落盘到仓库根的 `data_store/`(已 gitignore)。
 
+## 3.5 一键采集训练数据(`fetch_training_data`)
+
+用户**一条命令**即可把训练所需数据落盘(走既有 `store.py`,增量去重),无需手动操作 BaoStock。
+
+```bash
+# 默认:纯 BaoStock 行情(沪深主板非ST,2019 至今,增量),不采集财报/披露
+python -m trading_system.data.fetch_training_data --start 2019-01-01
+
+# 全量重拉
+python -m trading_system.data.fetch_training_data --start 2019-01-01 --full
+
+# 额外采集财报/披露(需 Tushare token;无 token 或失败会自动降级置空,行情照常落盘)
+TUSHARE_TOKEN=你的token \
+python -m trading_system.data.fetch_training_data --start 2019-01-01 --enable-disclosure
+```
+
+数据源分级与防御:
+- **BaoStock = 硬依赖**:登录失败 / 整体拉取失败 → 进程**非零退出**(行情是训练命根子,不静默)。
+  单只票失败重试 ≤2 次后计入失败名单、继续下一只;失败率 >5% 告警。**单进程顺序拉**(不上多线程)。
+- **Tushare = 软依赖**:任何异常(网络/token 失效/限流/接口变更)→ 退避重试 ≤2 次 → 仍失败则
+  **降级:披露字段置 NULL、主流程照常产出可训练的行情数据集**,绝不让 Tushare 异常毁掉行情。
+- **双价格层(INV-2)**:同源取不复权(adjustflag=3)+ 后复权(adjustflag=1),`adj_factor=后复权收盘/不复权收盘`;
+  涨跌停价只用不复权昨收;PIT `isST` 决定 ST 的 5% 涨跌停。后复权只用 BaoStock 单源,不跨源拼接。
+- **PIT 语义**:`NULL`(未采集/未知)与 `has_preann=False`(已确认未发预告)用 nullable boolean 严格区分。
+- `--enable-disclosure` 未开 → 披露字段全 NULL → Phase 2 披露 overlay 自动短路(默认不启用,与 v3.1 一致)。
+
+落盘后,Phase 1 特征流水线 / Phase 3 训练直接从 `store` 读,无需搬运。
+> 真实 BaoStock / Tushare 网络拉取为 **NOT RUN**(需网络 / token);离线已用 mock 验证开关、降级、
+> 硬失败退出、增量去重、双价格层完整、PIT 语义共 6 类(`tests/test_fetch_training_data.py`)。
+
 ## 4. Phase 路线图与验收节奏
 
 | Phase | 内容 | 验收脚本 | 通过标准(摘要) |
