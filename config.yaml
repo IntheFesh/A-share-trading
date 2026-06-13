@@ -51,11 +51,11 @@ risk:
   stop_loss_atr_mult: 2.5           # 硬止损 = 入场价 - 2.5N
   take_profit_ladder: [1.0, 2.0]    # 止盈阶梯 +1R / +2R
   trail_atr_mult: 2.5               # 跟踪止损系数 c
-  max_holding_days: 10              # 最大持有期 H 上界(= H_max)
+  max_holding_days: 25              # 一笔交易最长持有的交易日数 = H_max;用户实际短线打法上限 25 个交易日
 
 # === 区间划分(回测三纪律的物理隔离)===
 splits:
-  embargo_days: 13                  # = H_max(10) + K(2) + 1,运行时断言
+  embargo_days: 28                  # = H_max(25) + K_limitdown(2) + 1;训练截止距盲测段须 ≥ 此值,防标签窗与盲测段重叠泄漏
   blind_segment_start: "2025-07-01" # 盲测段起点;调参时严禁触碰
 
 # === 冠军挑战者(影子运行式)===

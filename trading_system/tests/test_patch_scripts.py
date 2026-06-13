@@ -87,10 +87,10 @@ class TestModelCard:
 class TestEmbargo:
     def test_train_end_too_close_raises(self):
         with pytest.raises(ValueError):
-            assert_train_end_safe("2025-06-25", "2025-07-01", 13)   # 间隔不足 13 个交易日
+            assert_train_end_safe("2025-06-25", "2025-07-01", 28)   # 间隔不足 28 个交易日
 
     def test_train_end_safe_passes(self):
-        assert assert_train_end_safe("2025-05-01", "2025-07-01", 13) >= 13
+        assert assert_train_end_safe("2025-03-01", "2025-07-01", 28) >= 28
 
     def test_train_and_save_blocks_peeking(self, tmp_path):
         ds, _ = _dataset()
