@@ -104,6 +104,7 @@ def train_and_save(
     from trading_system.features.registry import compute_feature
     from trading_system.invariants import FeatureSpec
     from trading_system.labels import build_y_h
+    from trading_system.feature_cache import cache_from_config, dataset_fingerprint, make_key
     from trading_system.model.cv import assert_train_end_safe
     from trading_system.model.model_io import ModelCard, save_model
 
@@ -116,9 +117,19 @@ def train_and_save(
     if panel.empty:
         raise ValueError(f"train_end={train_end} 之前无数据可训练")
     work = panel.sort_values(["code", "trade_date"]).reset_index(drop=True)
-    for feat in features:
-        work[feat] = compute_feature(feat, work).reindex(work.index)
-    work["__label__"] = build_y_h(work, label_horizon)
+
+    # 特征/标签缓存(命中即读,内容不变;只加速,不改变结果)
+    cache = cache_from_config(config)
+    label_spec = {"type": "fixed_h", "h": label_horizon}
+    key = make_key(dataset_fingerprint(work), features, label_spec)
+    cached = cache.get(key)
+    if cached is not None:
+        work = cached
+    else:
+        for feat in features:
+            work[feat] = compute_feature(feat, work).reindex(work.index)
+        work["__label__"] = build_y_h(work, label_horizon)
+        cache.put(key, work[["code", "trade_date", *features, "__label__"]])
 
     specs = [FeatureSpec(f) for f in features]
     model, names = train_l2_model(work, specs, "__label__", route=route)

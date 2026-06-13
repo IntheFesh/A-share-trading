@@ -245,3 +245,29 @@ class TestQualityMonotonic:
         bad = good.copy()
         bad.loc[bad.index[5], "adj_factor"] = 0.5             # 人为下降
         assert q.check_adj_factor_monotonic(bad).status == q.WARN
+
+
+# ── 特征/标签缓存(命中=重算一致)────────────────────────────────────────────
+class TestFeatureCache:
+    def test_cache_hit_equals_recompute(self, tmp_path):
+        from trading_system.feature_cache import FeatureCache, compute_features_cached
+        from trading_system.features.registry import compute_feature
+
+        cal = synthetic.make_calendar("2020-01-06", 60)
+        panel = pl.build_price_layers(synthetic.make_raw_panel(["600000", "600001"], cal, seed=9))
+        feats = ["ret_5", "ma_ratio_20"]
+        work = panel.sort_values(["code", "trade_date"]).reset_index(drop=True)
+        direct = {f: compute_feature(f, work).reindex(work.index).to_numpy() for f in feats}
+
+        cache = FeatureCache(tmp_path / "c", enabled=True)
+        w1 = compute_features_cached(work.copy(), feats, cache)   # 写缓存
+        w2 = compute_features_cached(work.copy(), feats, cache)   # 读缓存(命中)
+        for f in feats:
+            assert np.allclose(w1[f].to_numpy(), direct[f], equal_nan=True)
+            assert np.allclose(w2[f].to_numpy(), direct[f], equal_nan=True)   # 命中=重算
+
+    def test_cache_disabled_is_noop(self, tmp_path):
+        from trading_system.feature_cache import FeatureCache
+        cache = FeatureCache(tmp_path / "c", enabled=False)
+        cache.put("k", pd.DataFrame({"a": [1]}))
+        assert cache.get("k") is None                            # 关闭时不读写

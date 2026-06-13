@@ -40,6 +40,7 @@ def _config(tmp_path, **overrides):
                     "output_dir": str(tmp_path / "out")}
     cfg["features"] = ["ret_1", "ret_5", "ret_20"]            # 加速:小特征集
     cfg["splits"]["blind_segment_start"] = "2030-01-01"       # 远期,默认不触碰
+    cfg.setdefault("training", {}).setdefault("cache", {})["cache_dir"] = str(tmp_path / "tcache")
     cfg.update(overrides)
     return cfg
 

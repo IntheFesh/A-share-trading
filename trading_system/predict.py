@@ -62,8 +62,9 @@ def run_prediction(
     assert pd.to_datetime(panel["trade_date"]).max() <= asof, "预测使用了 asof 之后的数据(违反 PIT)"
 
     work = panel.sort_values(["code", "trade_date"]).reset_index(drop=True)
-    for feat in features:
-        work[feat] = compute_feature(feat, work).reindex(work.index)
+    # 特征缓存(命中即读;只加速,不改变结果)
+    from trading_system.feature_cache import cache_from_config, compute_features_cached
+    work = compute_features_cached(work, features, cache_from_config(config), spec_tag="predict")
     work["__score__"] = predict_scores(card.model, work, card.feature_names)
 
     asof_rows = work[pd.to_datetime(work["trade_date"]) == asof].dropna(subset=["__score__"]).copy()
