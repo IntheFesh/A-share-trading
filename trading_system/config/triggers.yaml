@@ -1,0 +1,22 @@
+# config/triggers.yaml — L1 触发器粗桶边界
+# 对应 v3.1 第六章。纪律:只用粗桶(回撤桶/回调天数桶/缩量桶),
+# 禁止网格寻优 / 最优点挑选(代码里不得出现 grid search)。全部阈值"待自验"。
+
+# A 牛回头:趋势中沿均线回踩后的再启动
+trigger_A_pullback:
+  enabled: true
+  drawdown_buckets: [0.05, 0.10, 0.15]      # 回撤粗桶边界  # TODO: Phase 1 自验
+  pullback_days_buckets: [3, 5, 8]          # 回调天数粗桶  # TODO: Phase 1 自验
+  ma_ref: 20                                # 参考均线(后复权)  # TODO: Phase 1 自验
+
+# B 缩量低位首板
+trigger_B_first_board:
+  enabled: true
+  volume_shrink_buckets: [0.5, 0.7, 0.9]    # 缩量桶(当日量/过去5日均量)  # TODO: Phase 1 自验
+  low_position_buckets: [0.2, 0.35, 0.5]    # 低位分位桶  # TODO: Phase 1 自验
+
+# C RPS 龙头
+trigger_C_rps_leader:
+  enabled: true
+  rps_buckets: [80, 90, 95]                 # 相对强弱粗桶  # TODO: Phase 1 自验
+  rps_window: 120                           # RPS 回看窗  # TODO: Phase 1 自验

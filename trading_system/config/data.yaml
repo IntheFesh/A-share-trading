@@ -1,0 +1,49 @@
+# config/data.yaml — 数据源、路径、交易池规则
+# 对应 v3.1 第二章数据层、§1.1 交易池。Phase 0 使用。
+# 纪律:后复权(adj)只用 BaoStock 一家来源(INV-2 单一来源),不与 Tushare 复权价拼接。
+
+store:
+  # 运行期 Parquet 落盘根目录(相对仓库根;已 gitignore)。
+  path: "./data_store"
+  parquet_compression: "zstd"
+  partition_by: "year"          # 按年分区
+
+sources:
+  baostock:                     # 主源:日线后复权 + 交易日历(免费,无 token)
+    enabled: true
+    note: "不支持多线程;采集用多进程或串行 + 重试"
+    retry: 3
+  tushare:                      # 备源 + 披露日历 / 业绩预告 / 退市列表(需 token)
+    enabled: true
+    # 建议用环境变量提供,勿提交真实 token。代码优先读 env TUSHARE_TOKEN,其次读此处。
+    token_env: "TUSHARE_TOKEN"
+    token: ""                   # TODO: Phase 0 填入(或留空走环境变量)
+    retry: 3
+  tencent:                      # 盘中快照(qt.gtimg.cn;GBK、'~' 分隔)。Phase 4 主用。
+    enabled: true
+    base_url: "https://qt.gtimg.cn/q="
+    encoding: "gbk"
+  sina:                         # 盘中快照备源(需 Referer 头)。Phase 4 主用。
+    enabled: true
+    base_url: "https://hq.sinajs.cn/list="
+    headers:
+      Referer: "https://finance.sina.com.cn"
+
+# 盘中快照限频(腾讯/新浪)
+realtime_rate_limit:
+  max_codes_per_request: 100    # 批量 <= 100 只/请求
+  max_requests_per_second: 10   # 全局 <= 10 次/秒
+
+universe:                       # 交易池过滤(v3.1 §1.1)
+  boards:                       # 沪深主板:60xxxx(沪)/ 000xxx(深)
+    - "60"
+    - "000"
+  exclude_st: true              # 剔除 ST / *ST(按历史当日状态)
+  exclude_delisting: true       # 剔除退市整理
+  exclude_suspended: true       # 剔除停牌
+  new_listing_min_days: 60      # 上市未满 60 日次新剔除
+  exclude_one_price_limit_at_entry: true   # 入场时刻一字板剔除
+  include_delisted_history: true            # 必须含退市股历史(回测防幸存者偏差)
+
+calendar:
+  cache_filename: "trade_calendar.parquet"  # 交易日历本地缓存(store.path 下)

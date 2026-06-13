@@ -1,0 +1,32 @@
+# config/costs.yaml — 成本六层参数
+# 对应 v3.1 第四章。c_round = c_tax + c_exchange + c_commission + c_mincomm
+#                                 + c_spread + c_impact + c_failure
+# 单位说明:费率用小数(0.0005 = 0.05% = 5bp);金额用元。
+
+# ---- 已核验下限(定值;勿改)----
+# c_official = 印花税(卖出 0.05%) + 经手费(双向 2×0.00341%) = 5.682 bp
+verified_floor:
+  stamp_tax_sell: 0.0005          # 印花税:卖出单边 0.05%(已核验)
+  exchange_fee_oneway: 0.0000341  # 经手费:单边 0.00341%(已核验;代码按双向 2× 计)
+
+# ---- 待核项(标注来源待核实)----
+transfer_fee:
+  # 过户费 c_transfer = 2 × theta_transfer(双向)。
+  theta_transfer_oneway: 0.00001  # 暂设 0.001%  # TODO: Phase 0 据交割单核实
+commission:
+  rate_oneway: 0.0003             # 佣金率单边占位 0.03%  # TODO: Phase 0 据券商核实
+  min_per_side_yuan: 5.0          # 最低佣金每边占位 5 元  # TODO: Phase 0 据券商核实
+  # 最低佣金闸门:c_mincomm_rt(Q) = min_per_side_yuan / Q
+  # 最小订单金额过滤:Q_i >= q_min_amount_yuan 否则跳过该笔
+  q_min_amount_yuan: 16667        # ≈ 5 / 0.0003 的占位  # TODO: Phase 0 自验
+
+# ---- 可配置项(压力矩阵会扫;见 backtest/stress.py)----
+slippage:
+  default_bp: 10                  # 默认滑点(bp)  # TODO: Phase 2 自验
+  stress_grid_bp: [5, 10, 20, 30] # 压力矩阵扫描档(v3.1 第四章/审批门槛用)
+impact:
+  model: "none"                   # 冲击成本模型  # TODO: Phase 2 自验(暂不计)
+failure:
+  cost_bp: 0                      # 成交失败的机会成本占位  # TODO: Phase 2 自验
+spread:
+  half_spread_bp: 0               # 买卖价差(半边)占位  # TODO: Phase 2 自验
