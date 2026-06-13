@@ -24,7 +24,11 @@ from trading_system.data import price_layers as pl
 from trading_system.data.collectors import synthetic
 from trading_system.model import model_io
 from trading_system.model.cv import assert_train_end_safe
-from trading_system.model.train import train_and_save
+from trading_system.model.train import (
+    compare_label_routes,
+    compute_time_decay_weights,
+    train_and_save,
+)
 
 
 # ── 公共构造 ────────────────────────────────────────────────────────────────
@@ -227,6 +231,50 @@ class TestPredictEndToEnd:
         for col in ("atr_n", "single_cap_pct", "kelly_suggest_pct", "stop_distance_pct", "amihud_illiq"):
             assert col in table.columns
         assert table["atr_n"].notna().any() and table["stop_distance_pct"].notna().any()
+
+
+# ── 批3:时间衰减 / 引擎标签 / A·B·C 对比 / Optuna ──────────────────────────
+class TestTrainingUpgrades:
+    def test_time_decay_weights_monotonic(self):
+        import pandas as pd
+        dates = list(pd.bdate_range("2020-01-06", periods=40))
+        w = compute_time_decay_weights(dates, dates[-1], half_life=10)
+        assert abs(w[-1] - 1.0) < 1e-12          # train_end 当日权重=1
+        assert w[0] < w[-1]                        # 老样本权重 < 新样本
+        assert np.all(np.diff(w) >= -1e-12)        # 随时间非递减
+
+    def test_train_with_time_decay_enabled(self, tmp_path):
+        from trading_system.model.model_io import load_model
+        ds, _ = _dataset(n_days=60, n_codes=10, seed=1)
+        cfg = _config(tmp_path)
+        cfg["training"]["time_decay"] = {"enabled": True, "half_life_active": 30}
+        card = load_model(train_and_save(ds, train_end="2020-03-10", config=cfg,
+                                         model_dir=cfg["paths"]["model_dir"]))
+        assert card.params["time_decay"] is not None and card.params["time_decay"]["half_life"] == 30
+
+    def test_engine_label_records_type(self, tmp_path):
+        from trading_system.model.model_io import load_model
+        ds, _ = _dataset(n_days=50, n_codes=6, seed=2)
+        cfg = _config(tmp_path)
+        cfg["training"]["label"] = {"type": "engine", "fixed_horizon": 5}
+        card = load_model(train_and_save(ds, train_end="2020-03-01", config=cfg,
+                                         model_dir=cfg["paths"]["model_dir"]))
+        assert card.params["label_type"] == "engine"
+
+    def test_compare_routes_three_rows(self, tmp_path):
+        ds, _ = _dataset(n_days=90, n_codes=12, seed=3)
+        cfg = _config(tmp_path)
+        table = compare_label_routes(ds, cfg, train_end="2020-04-30", n_splits=2)
+        assert set(table["route"]) == {"A", "B", "C"} and len(table) == 3
+
+    def test_tune_enabled_records_params(self, tmp_path):
+        from trading_system.model.model_io import load_model
+        ds, _ = _dataset(n_days=90, n_codes=10, seed=4)
+        cfg = _config(tmp_path)
+        cfg["training"]["tune"] = {"enabled": True, "n_trials": 3}
+        card = load_model(train_and_save(ds, train_end="2020-04-30", config=cfg,
+                                         model_dir=cfg["paths"]["model_dir"]))
+        assert card.params["tuned_params"] is not None   # 调参参数已记录(粗调,purged CV)
 
 
 # ── 脚本可导入 + 读 config(单一源贯通)──────────────────────────────────────
