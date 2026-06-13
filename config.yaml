@@ -102,3 +102,9 @@ training:
                                     # "engine"=引擎版动态出场净收益(对齐实际交易,慢,需缓存)
     fixed_horizon: 5                # type=fixed_h 时的持有窗(交易日)
                                     # type=engine 时用 risk.max_holding_days(25)等出场参数
+
+# === 因子体检报告(phase1_factor_report 的 (B) 真实数据段)===
+factor_report:
+  label_horizon: 5                  # 因子体检用的标签持有期(交易日);算未来 N 天收益做 RankIC
+  train_end_for_report: null        # 因子体检的数据截止日;null=用全部数据。注意:若要避免在盲测段上
+                                    # 看因子(防数据窥探),可设为盲测段起点之前的日期
