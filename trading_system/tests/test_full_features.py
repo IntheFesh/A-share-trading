@@ -233,6 +233,27 @@ class TestWalkForward:
         assert np.isfinite(eq["net_return"]) and np.isfinite(wt["net_return"])
         assert abs(eq["net_return"] - wt["net_return"]) > 1e-9   # 加权与等权结果不同
 
+    def test_risk_mode_weighting_properties(self):
+        # 批4:逆 ATR 反波动权重 × 总敞口,逐票单股上限截断,不补杠杆(runner risk 模式同公式)
+        from trading_system.portfolio import inverse_atr_weights
+        atrs = np.array([0.2, 0.4, 0.8])
+        # 不触发单股上限时:ATR 越大权重越低,且总和=总敞口
+        rel = inverse_atr_weights(atrs)
+        w = np.minimum(rel * 0.3, 0.3)
+        assert w[0] > w[1] > w[2] and abs(w.sum() - 0.3) < 1e-12
+        # 触发单股上限时:每票 ≤ 上限,总和 ≤ 总敞口(不补杠杆)
+        w2 = np.minimum(inverse_atr_weights(atrs) * 0.5, 0.08)
+        assert (w2 <= 0.08 + 1e-12).all() and w2.sum() <= 0.5 + 1e-12
+
+    def test_risk_mode_runs(self):
+        cal = synthetic.make_calendar("2020-01-06", 40)
+        panel = pl.build_price_layers(synthetic.make_raw_panel(
+            [f"60000{i}" for i in range(8)], cal, seed=5)).copy()
+        panel["__score__"] = np.random.default_rng(3).normal(size=len(panel))
+        res = walk_forward_backtest(panel, "__score__", top_k=3, cost_fraction=0.001,
+                                    position_mode="risk", total_exposure_cap=0.5, single_cap=0.08)
+        assert res["n_trades"] > 0 and np.isfinite(res["net_return"])
+
 
 # ── 质检新项 ────────────────────────────────────────────────────────────────
 class TestQualityMonotonic:
