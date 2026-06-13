@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# 测试 / 缓存
+.pytest_cache/
+.duckdb/
+*.duckdb
+*.duckdb.wal
+
+# 运行期数据落盘(永不入库:体积大且可由数据源重建)
+# 注意:用 data_store/* 而非 data_store/,否则无法再 include .gitkeep(父目录被整体排除)。
+data_store/*
+!data_store/.gitkeep
+*.parquet
+
+# 报告产物(落盘静态图 / Markdown 报告;按需保留,默认不入库)
+trading_system/reports/output/
+*.png
+*.html
+
+# IDE
+.idea/
+.vscode/
+
+# 日志
+*.log
+logs/

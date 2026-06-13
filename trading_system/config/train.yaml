@@ -1,0 +1,57 @@
+# config/train.yaml — 标签 h、embargo、CV、Optuna 空间(Phase 3 才用)
+# 对应 v3.1 第七章 L2、第八章训练、第九章 embargo、第十三章审批。
+
+labels:
+  # 生产可交易标签 y_prod:raw 价、tau_exit >= t+2、扣成本(INV-1)
+  production_min_exit_offset: 2
+  # 固定窗口对照 y_h
+  fixed_horizons: [1, 2, 3, 5, 8, 10]
+  # 诊断标签 y_mtm0(h=0):单独命名空间,禁止进训练/回测/审批(INV-1)
+  diagnostic_h0_enabled: true
+
+# Purging / embargo(INV 核心):embargo = H_max + K_limitdown + 1
+embargo:
+  h_max: 10                    # 最大标签窗
+  k_limitdown: 2               # 连续跌停顺延
+  gap: 13                      # = h_max + k_limitdown + 1(留给 purged CV 的间隔)
+
+cv:
+  scheme: "purged_time_series" # 训练/验证间留 embargo;标签窗重叠样本必须 purge
+  n_splits: 5                  # TODO: Phase 3 自验
+  block_len_H: 10              # 不重叠分块 RankIC 的块长(避重叠虚高)  # TODO: Phase 3 自验
+
+# 三标签路线并行(A 截面秩回归 / B winsorized 净收益回归 / C lambdarank 分位)
+label_routes:
+  A_rank_regression: true
+  B_winsorized_net_return: true
+  C_lambdarank_quantile: true
+  C_n_quantiles: 5             # 优先五分位
+
+# LightGBM(Phase 3):ranker 的 group 必须按交易日(group_t = |G_t|)
+lightgbm:
+  objective_by_route:
+    A: "regression"
+    B: "regression"
+    C: "lambdarank"
+  group_by: "trade_date"       # INV 核心:不能混成大表
+  # 冻结超参后 Tier 1 重训:滚动 12 个月窗口
+  tier1_rolling_months: 12
+
+# Optuna(Tier 2):搜索空间须先注册后运行(禁止边搜边扩)
+optuna:
+  n_trials: 30                 # 30~50 起  # TODO: Phase 3 自验
+  pruner: "median"
+  selection_rule: "1se"        # 1-SE 规则选参
+  objective: "purged_cv_topk_net_return"  # 训练窗内 purged 时序 CV 的扣费 top-K 净收益
+  registry_db: "experiments.sqlite"        # 全 trial 写入,供 DSR 的 N 与 PBO 记账(INV-6)
+  search_space: {}             # TODO: Phase 3 预注册搜索空间块(先注册后运行)
+
+# 上线审批门槛(v3.1 第十三章;同时满足才上线)
+approval:
+  require_R_blind_positive: true
+  dsr_min: 0.95                # DSR > 0.95
+  pbo_max: 0.30                # PBO < 30%
+  require_delta_maxdd_nonpositive: true     # ΔMaxDD <= 0
+  slippage_stress_bp: 20       # SlippageStress_20bp > 0
+  first_board_extra_stress_bp: 30           # 首板另需 SlippageStress_30bp > 0
+  execution_gap_max_bp: 15     # ExecutionGap_20trades < 15bp

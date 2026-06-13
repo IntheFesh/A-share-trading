@@ -1,0 +1,30 @@
+# config/risk.yaml — 单股上限、连续跌停 K、波动率目标、凯利档、簇限制
+# 对应 v3.1 第十章。INV-5:w_max = min(w_hard, L_tail/g_hat);禁止 15% 默认值。
+
+limit_ratio:
+  main_board: 0.10              # 主板涨跌停比例(用 raw 昨收算)
+  st: 0.05                      # ST 涨跌停比例
+
+# 硬上限档(INV-5;禁止出现 15%)
+hard_caps:
+  main_board: 0.08             # 普通主板 <= 8%
+  special: 0.05                # 涨停/首板/低流动性/小市值/题材拥挤 <= 5%
+
+continuous_limit_down:
+  k: 2                         # 连续跌停天数 K(尾部压力);见 INV-5 与 embargo
+  l_tail: 0.015                # 尾部损失预算 L_tail  # TODO: Phase 2 自验
+
+# 凯利符号三档:r_t = r_0 * 1{f*>0} * s
+kelly:
+  r0: 0.005                    # 基础单笔风险预算 0.5%
+  s_levels: [1.0, 0.5, 0.0]    # 刹车档 s
+
+# 总敞口:w_total = min(0.5, sigma*/sigma_hat, m_t, w_liquidity, w_limitdown)
+total_exposure:
+  hard_ceiling: 0.5            # 硬上限 0.5
+  sigma_star_annual: 0.20      # 年化波动率目标 sigma*  # TODO: Phase 2 自验
+
+# 拥挤簇限制(v3.1 §10.x)
+cluster_limits:
+  normal: 0.25                 # 普通簇 <= 25%
+  small_lowliq_sametheme: 0.15 # 小市值 + 低流动性 + 同题材 <= 15%

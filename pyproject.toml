@@ -1,0 +1,14 @@
+[project]
+name = "trading_system"
+version = "0.0.1"
+description = "A股日频截面选股交易系统(纯后端,无前端);实现严格按 v3.1 冻结设计版分 Phase 推进。"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+# 从仓库根目录运行 `pytest` 即可:把根目录加入 import 路径,测试位于包内 tests/。
+pythonpath = ["."]
+testpaths = ["trading_system/tests"]
+addopts = "-q"
+
+[tool.setuptools]
+packages = ["trading_system"]

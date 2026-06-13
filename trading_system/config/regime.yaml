@@ -1,0 +1,31 @@
+# config/regime.yaml — L0 六指标权重、五阶段阈值、HiLo 参数
+# 对应 v3.1 §5.1 与 v0.3。情绪温度 T_t 是"组内常数"(当天同值),进 L2 须经交互(INV-4)。
+
+# 六指标(由日线 OHLC + raw 昨收推导);初始等权,权重待自验
+six_indicators:
+  weights:                     # 全部 1/6 初始等权  # TODO: Phase 1 自验
+    limit_up_count: 0.1667          # 涨停家数
+    max_consecutive_boards: 0.1667  # 最高连板高度
+    promotion_rate: 0.1667          # 晋级率
+    blowup_rate: 0.1667             # 炸板率(负向)
+    prev_limitup_premium: 0.1667    # 昨日涨停今日溢价
+    limitdown_plus_nuclear: 0.1667  # 跌停 + 核按钮数(负向)
+
+# 情绪温度 T_t:对加权合成值做滚动分位
+temperature:
+  quantile_window: 250         # 250 日分位
+
+# 五阶段映射(按 T_t 分位切),以及各阶段的总敞口乘子 m_t
+five_stage:
+  thresholds: [0.2, 0.4, 0.6, 0.8]   # 分位切点 -> 5 段  # TODO: Phase 1 自验
+  m_t_by_stage: [0.2, 0.5, 0.8, 1.0, 0.6]  # 每段总敞口乘子  # TODO: Phase 1 自验
+
+# HiLo 高低切:全市场按近20日涨幅分十层,高层 vs 低层近 N 日收益差,再分位变换
+hilo:
+  rank_window: 20              # 分层用的涨幅回看窗
+  n_layers: 10                 # 分十层
+  spread_window: 5             # 高低层收益差回看 N  # TODO: Phase 1 自验
+
+# HMM 状态概率(增强可选,Phase 3 后再做)
+hmm:
+  enabled: false               # 增强可选,Phase 3 后再做
