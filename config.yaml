@@ -1,0 +1,67 @@
+# ============================================================================
+# 配置中心(单一参数源)。五个入口脚本的常用参数一律从本文件读取,禁止在脚本内硬编码。
+# 在本文件修改参数即可影响全部脚本;改脚本内的值会导致脚本间参数不一致。
+# ============================================================================
+
+# === 路径(用户按本机修改;Windows 示例 data_dir: "D:/trading_data")===
+paths:
+  data_dir: "./data_store"          # 数据集落盘目录
+  model_dir: "./trading_models"     # 模型("出生证明"包)落盘目录
+  output_dir: "./trading_output"    # 作战手册 / 回测报告 / 影子对决留痕输出目录
+
+# === 交易池 ===
+universe: "main_board"              # 仅沪深主板非 ST
+
+# === 数据区间 ===
+data:
+  start: "2019-01-01"
+  enable_disclosure: false          # 财报消息面开关,默认关(v3.1 附录 C:待 Phase 2 验证)
+
+# === 特征清单(顺序敏感:训练/预测/回测必须一致;与 features.registry 注册名严格对应)===
+features:
+  - ret_1
+  - ret_5
+  - ret_20
+  - vol_20
+  - volume_ratio_5
+  - amihud_20
+  - ma_ratio_20
+  - ma_ratio_60
+  - reversal_5
+  - max_ret_5
+  - dist_ma20
+  - dist_high_20
+
+# === 成本参数(Phase 0 据交割单核实后回填)===
+cost:
+  stamp_duty: 0.0005                # 印花税(卖出单边,已核验)
+  exchange_fee: 0.0000341           # 经手费(单边,已核验)
+  transfer_fee: 0.00001             # 过户费(单边,待核验)
+  commission_rate: 0.0003           # 佣金率(单边,待核验)
+  min_commission_per_side: 5        # 最低佣金(每边,元)
+
+# === 风控参数 ===
+risk:
+  single_stock_cap_normal: 0.08     # 普通主板单股上限
+  single_stock_cap_high_risk: 0.05  # 涨停/首板/低流动性/小市值/题材拥挤
+  stop_loss_atr_mult: 2.5           # 硬止损 = 入场价 - 2.5N
+  take_profit_ladder: [1.0, 2.0]    # 止盈阶梯 +1R / +2R
+  trail_atr_mult: 2.5               # 跟踪止损系数 c
+  max_holding_days: 10              # 最大持有期 H 上界(= H_max)
+
+# === 区间划分(回测三纪律的物理隔离)===
+splits:
+  embargo_days: 13                  # = H_max(10) + K(2) + 1,运行时断言
+  blind_segment_start: "2025-07-01" # 盲测段起点;调参时严禁触碰
+
+# === 冠军挑战者(影子运行式)===
+champion_challenger:
+  shadow_period_days: 10            # 一个影子期 = 10 个交易日
+  switch_requires_consecutive: 3    # 挑战者需连续 N 个影子期累计不输于冠军才换届(防单期噪声)
+  # 挑战者 = run_train.py 用"截至当下全部数据(含最近 10 天)"训练的完整模型(用户真会用的版本,
+  # 不阉割);先不上线实用,先并行影子空跑;用其影子期内的真实前瞻成绩与冠军比较。
+
+# === 回测纪律 ===
+backtest:
+  max_param_combos: 50              # 粗桶参数组合上限,超过报错(禁止精细网格)
+  pbo_warn_threshold: 0.30          # PBO 超此值在报告中标红警告

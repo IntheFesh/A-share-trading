@@ -83,6 +83,59 @@ def train_l2_model(
     return model, names
 
 
+def train_and_save(
+    dataset: pd.DataFrame,
+    *,
+    train_end: str,
+    config: dict,
+    model_dir: "str | Path",
+    label_horizon: int = 5,
+    route: str = "C",
+):
+    """用截至 train_end 的数据训练 L2 模型并存为出生证明包。补丁(run_train 的核心)。
+
+    本函数是模型的**唯一生产者**:不做对比、不做上线决策。流程:断言 embargo(不触碰盲测段)→
+    按 config['features'] 顺序算特征(截面秩变换)→ 构造标签 → train_l2_model → 落盘 ModelCard。
+    特征清单/区间/参数从 config 读(勿在调用处硬编码)。返回模型文件路径。
+    """
+    from pathlib import Path
+
+    import trading_system.features.builtin  # noqa: F401  确保内置特征已注册
+    from trading_system.features.registry import compute_feature
+    from trading_system.invariants import FeatureSpec
+    from trading_system.labels import build_y_h
+    from trading_system.model.cv import assert_train_end_safe
+    from trading_system.model.model_io import ModelCard, save_model
+
+    features = list(config["features"])
+    splits = config["splits"]
+    # 纪律:训练禁止触碰盲测段与其前的 embargo 间隔
+    assert_train_end_safe(train_end, splits["blind_segment_start"], int(splits["embargo_days"]))
+
+    panel = dataset[pd.to_datetime(dataset["trade_date"]) <= pd.Timestamp(train_end)].copy()
+    if panel.empty:
+        raise ValueError(f"train_end={train_end} 之前无数据可训练")
+    work = panel.sort_values(["code", "trade_date"]).reset_index(drop=True)
+    for feat in features:
+        work[feat] = compute_feature(feat, work).reindex(work.index)
+    work["__label__"] = build_y_h(work, label_horizon)
+
+    specs = [FeatureSpec(f) for f in features]
+    model, names = train_l2_model(work, specs, "__label__", route=route)
+
+    card = ModelCard(
+        model=model,
+        feature_names=names,
+        train_start=str(pd.to_datetime(panel["trade_date"]).min().date()),
+        train_end=str(pd.Timestamp(train_end).date()),
+        params={"label_horizon": label_horizon, "route": route,
+                "lgb": DEFAULT_LGB_PARAMS, "risk": config.get("risk"), "cost": config.get("cost")},
+        config_snapshot=config,
+        route=route,
+    )
+    return save_model(card, Path(model_dir))
+
+
 def predict_scores(model, df: pd.DataFrame, feature_names: "list[str]") -> np.ndarray:
     """对 df 用已训练模型打分(缺失特征行得 NaN)。"""
     sub = df[feature_names]
