@@ -268,6 +268,39 @@ class TestQualityMonotonic:
         assert q.check_adj_factor_monotonic(bad).status == q.WARN
 
 
+# ── 1E-5:数据质量诊断 + ATR 稳健化 ─────────────────────────────────────────
+class TestDataQuality1E:
+    def test_diagnose_adj_continuity_lists_anomalies(self):
+        cal = synthetic.make_calendar("2020-01-06", 30)
+        panel = pl.build_price_layers(synthetic.make_raw_panel(["600000"], cal, seed=2))
+        bad = panel.sort_values("trade_date").reset_index(drop=True)
+        bad.loc[15, "close_adj"] = bad.loc[15, "close_adj"] * 1.6  # +60% 非除权/非涨跌停/非停牌
+        flagged = q.diagnose_adj_continuity(bad)
+        assert len(flagged) >= 1
+        r0 = flagged.iloc[0]
+        assert (not r0["ex_div"]) and (not r0["at_limit"]) and (not r0["gap"])
+        assert set(["code", "trade_date", "adj_ret"]).issubset(flagged.columns)
+
+    def test_robust_atr_caps_spike(self):
+        from trading_system.backtest.engine import compute_atr
+        dates = synthetic.make_calendar("2020-01-06", 40).dates
+        rows, prev = [], 10.0
+        for j, d in enumerate(dates):
+            c = prev * 1.005
+            hi, lo = c * 1.005, prev * 0.995              # 正常日 TR 很小
+            if j == 36:
+                hi, lo = c * 1.5, prev * 0.5               # 末段单点异常巨幅 TR
+            rows.append(dict(code="600000", trade_date=pd.Timestamp(d), open_raw=prev,
+                             high_raw=round(hi, 2), low_raw=round(lo, 2), close_raw=round(c, 2),
+                             preclose_raw=round(prev, 2), volume=1e4, amount=1e4 * c,
+                             adj_factor=1.0, turn=1.0))
+            prev = c
+        bars = pl.build_price_layers(pd.DataFrame(rows))
+        plain = compute_atr(bars, 14).iloc[-1]
+        robust = compute_atr(bars, 14, robust=True, winsor_q=0.9).iloc[-1]
+        assert robust < plain   # 稳健化把单点异常 TR 截断 -> ATR 不被带歪
+
+
 # ── 特征/标签缓存(命中=重算一致)────────────────────────────────────────────
 class TestFeatureCache:
     def test_cache_hit_equals_recompute(self, tmp_path):

@@ -60,8 +60,13 @@ def _footer_md(regime: dict) -> str:
         "\n---\n"
         f"- 情绪温度 T_t = {regime.get('T_t')},阶段 = {regime.get('stage')}\n"
         f"- 总仓位乘子 m_t = {regime.get('m_t')},总敞口 w_total = {regime.get('w_total')}\n"
+        f"- 当日 HiLo 高低切 = {regime.get('hilo_t')}\n"
         f"- 刹车档 s = {regime.get('brake_level')}\n"
         f"- 距下次 Tier 1 = {regime.get('days_to_tier1')} 日,Tier 2 = {regime.get('days_to_tier2')} 日\n"
+        "- 注:T_t/阶段/m_t/HiLo 等 regime 指标**仅作参考展示,不进入选股打分**"
+        "(接入打分需以 INV-4 交互形式并经验证,属未来工作)。\n"
+        "- 注:pledge_high/goodwill_high/recent_regulatory_letter 需额外数据源(质押/商誉/监管函),"
+        "当前未接入则为空,不臆造。\n"
     )
 
 

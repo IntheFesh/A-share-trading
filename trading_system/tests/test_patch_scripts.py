@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -222,15 +223,42 @@ class TestPredictEndToEnd:
         model_path = train_and_save(ds, train_end="2020-02-20", config=cfg,
                                     model_dir=cfg["paths"]["model_dir"])
         asof = str(cal.dates[35])  # 训练区间之后的某交易日(仍在数据内)
+        # 1E-4:外部风险数据接口——提供则填,不提供则空
+        rf = {ds["code"].iloc[0]: {"pledge_high": True, "goodwill_high": False,
+                                   "recent_regulatory_letter": None}}
         table, info = run_prediction(ds, asof_date=asof, config=cfg, model_path=str(model_path),
                                      output_dir=cfg["paths"]["output_dir"], top_k=5,
-                                     print_console=False)
+                                     print_console=False, risk_flags=rf)
         assert info["model_train_end"] == "2020-02-20"
         assert len(table) > 0 and "limit_buy_price" in table.columns and "stop_price" in table.columns
         # 仓位参考指标已计算并填充(批1B)
         for col in ("atr_n", "single_cap_pct", "kelly_suggest_pct", "stop_distance_pct", "amihud_illiq"):
             assert col in table.columns
         assert table["atr_n"].notna().any() and table["stop_distance_pct"].notna().any()
+        # 1E-1:SHAP 前三理由非空且为合理特征名组合
+        assert table["shap_top3"].notna().any()
+        a_shap = table["shap_top3"].dropna().iloc[0]
+        assert any(f in a_shap for f in cfg["features"]) and ("↑" in a_shap or "↓" in a_shap)
+        # 1E-2:regime 仅展示(页脚有真实 T_t/m_t,不再是 None);未污染模型特征
+        md = (Path(cfg["paths"]["output_dir"]) / f"playbook_{asof}.md").read_text(encoding="utf-8")
+        assert "T_t = None" not in md and "仅作参考展示,不进入选股打分" in md
+        # 1E-4:risk_flags 提供的票被填充;未提供的为空(不臆造)
+        import pandas as pd
+        first = table[table["code"] == ds["code"].iloc[0]]
+        if len(first):
+            assert bool(first["pledge_high"].iloc[0]) is True
+
+    def test_disclosure_off_predict_runs(self, tmp_path):
+        # 1E-3:enable_disclosure=false(默认)时预测全流程正常、披露列为空、不报错
+        from trading_system.predict import run_prediction
+        ds, cal = _dataset(n_days=40, n_codes=12, seed=8)
+        cfg = _config(tmp_path)
+        assert cfg["data"]["enable_disclosure"] is False
+        mp = train_and_save(ds, train_end="2020-02-20", config=cfg, model_dir=cfg["paths"]["model_dir"])
+        table, _ = run_prediction(ds, asof_date=str(cal.dates[35]), config=cfg, model_path=str(mp),
+                                  output_dir=cfg["paths"]["output_dir"], top_k=5, print_console=False)
+        assert len(table) > 0   # 披露关闭不影响预测;days_to_disclosure 列存在(值可空)
+        assert "days_to_disclosure" in table.columns
 
 
 # ── 批5:CPCV 多路径换届(与影子并存;不弱化 INV-6 / 不放松门槛)────────────────

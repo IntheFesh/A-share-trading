@@ -132,6 +132,35 @@ def check_disclosure_fields(panel: pd.DataFrame, window: int = 10) -> CheckResul
     )
 
 
+def diagnose_adj_continuity(panel: pd.DataFrame, max_daily: float = 0.105) -> pd.DataFrame:
+    """列出被 check_adj_continuity 标记为异常的所有行及其上下文,供人工核查(真错 vs 复权边界)。
+
+    返回 DataFrame[code, trade_date, adj_ret, ex_div, at_limit, gap]:
+      ex_div=相邻日 adj_factor 变化(除权日,后复权下收益应连续);at_limit=当日涨跌停;
+      gap=当日或前一日停牌(缺口)。这三类为合理边界;均为 False 的大跳变才更可能是真数据错。
+    """
+    rows = []
+    for _, g in panel.sort_values(["code", "trade_date"]).groupby("code", sort=False):
+        g = g.reset_index(drop=True)
+        adj_c = g["close_adj"].to_numpy(dtype="float64")
+        factor = g["adj_factor"].to_numpy(dtype="float64")
+        susp = g["is_suspended"].to_numpy(dtype=bool)
+        lu = g["is_limit_up"].to_numpy(dtype=bool)
+        ld = g["is_limit_down"].to_numpy(dtype=bool)
+        for i in range(1, len(g)):
+            if adj_c[i - 1] <= 0:
+                continue
+            ret = adj_c[i] / adj_c[i - 1] - 1.0
+            ex_div = bool(abs(factor[i] - factor[i - 1]) > 1e-12)
+            gap = bool(susp[i] or susp[i - 1])
+            at_limit = bool(lu[i] or ld[i])
+            if abs(ret) > max_daily and not ex_div and not gap and not at_limit:
+                rows.append({"code": g.loc[i, "code"], "trade_date": g.loc[i, "trade_date"],
+                             "adj_ret": round(float(ret), 4), "ex_div": ex_div,
+                             "at_limit": at_limit, "gap": gap})
+    return pd.DataFrame(rows, columns=["code", "trade_date", "adj_ret", "ex_div", "at_limit", "gap"])
+
+
 def check_adj_factor_monotonic(panel: pd.DataFrame, tol: float = 1e-9) -> CheckResult:
     """后复权因子单调性:同一只票的 adj_factor 应随时间非递减(后复权随分红累积上调);
     出现下降疑为数据错误。无除权时不变。"""
