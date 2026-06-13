@@ -16,6 +16,25 @@ def embargo_from_config(h_max: int, k_limitdown: int) -> int:
     return h_max + k_limitdown + 1
 
 
+def assert_train_end_safe(train_end, blind_segment_start, embargo_days: int) -> int:
+    """断言训练截止日距盲测段起点至少留 embargo_days 个交易日(否则训练触碰未来,报错)。
+
+    用 numpy busday_count 作交易日近似(忽略节假日,足够做"不许偷看"的硬闸)。
+    train_end 晚于盲测段起点 -> gap 为负 -> 必然 < embargo,报错。返回实际 gap。
+    """
+    import numpy as np
+
+    te = np.datetime64(str(train_end)[:10])
+    bs = np.datetime64(str(blind_segment_start)[:10])
+    gap = int(np.busday_count(te, bs))
+    if gap < embargo_days:
+        raise ValueError(
+            f"train_end={str(train_end)[:10]} 距盲测段 {str(blind_segment_start)[:10]} "
+            f"仅 {gap} 个交易日 < embargo {embargo_days};训练禁止触碰该间隔与盲测段。"
+        )
+    return gap
+
+
 def purged_walk_forward_splits(
     sorted_dates: "list | np.ndarray",
     *,
