@@ -97,6 +97,7 @@ def run_fetch(
     universe_codes: "list[str] | None" = None,
     universe_day: "str | None" = None,
     fail_rate_threshold: float = 0.05,
+    limit: "int | None" = None,
 ) -> int:
     """采集主流程(依赖可注入,便于离线测试)。返回进程退出码:0 成功 / 2 行情硬失败。"""
     end = end or dt.date.today().strftime("%Y-%m-%d")
@@ -111,6 +112,9 @@ def run_fetch(
             if not codes:
                 logger.error("交易池为空,无法采集;退出。")
                 return 2
+            if limit is not None and limit > 0:
+                codes = sorted(codes)[:limit]   # 排序后取前 limit 只,保证可复现
+                logger.info("已限制交易池为前 %d 只(--limit);全量请去掉 --limit。", len(codes))
             start_by_code = _start_by_code(codes, store, start, incremental)
             panel_raw, failed = bc.fetch_many(codes, start_by_code, end)
     except Exception as e:  # noqa: BLE001 — login/会话失败=硬失败

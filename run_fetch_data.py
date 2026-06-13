@@ -54,7 +54,7 @@ def write_dataset_card(card: dict, output_dir) -> Path:
     return p
 
 
-def run(config: dict, *, end=None, full: bool = False,
+def run(config: dict, *, end=None, full: bool = False, limit=None,
         baostock_collector=None, tushare_collector_factory=None, universe_codes=None) -> int:
     # 本参数在 config.yaml 中修改,请勿在此硬改(改这里会导致脚本间参数不一致)
     paths, data = config["paths"], config["data"]
@@ -63,7 +63,7 @@ def run(config: dict, *, end=None, full: bool = False,
         start=data["start"], end=end, universe=config["universe"],
         enable_disclosure=data["enable_disclosure"], incremental=not full, store=store,
         baostock_collector=baostock_collector, tushare_collector_factory=tushare_collector_factory,
-        universe_codes=universe_codes,
+        universe_codes=universe_codes, limit=limit,
     )
     if rc == 0:
         card = build_dataset_card(store, start=data["start"], end=end, universe=config["universe"],
@@ -81,8 +81,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="取数(参数见 config.yaml)")
     ap.add_argument("--end", default=None)
     ap.add_argument("--full", action="store_true", help="全量重拉(默认增量)")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="只采集前 N 只票(按代码排序);默认 None=全部")
     a = ap.parse_args(argv)
-    return run(load_config(), end=a.end, full=a.full)
+    return run(load_config(), end=a.end, full=a.full, limit=a.limit)
 
 
 if __name__ == "__main__":
