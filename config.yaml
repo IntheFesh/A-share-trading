@@ -63,6 +63,11 @@ splits:
 champion_challenger:
   shadow_period_days: 10            # 一个影子期 = 10 个交易日
   switch_requires_consecutive: 3    # 挑战者需连续 N 个影子期累计不输于冠军才换届(防单期噪声)
+  validation_method: "shadow"       # 验证方式:"shadow"=影子运行连胜(默认,行为不变);
+                                    # "cpcv"=组合净化交叉验证多路径分布裁决
+  cpcv_blocks: 8                    # CPCV 块数 S(偶数);路径数=C(S,S/2)
+  cpcv_pbo_max: 0.30                # 换届要求 PBO < 此值(不放松)
+  cpcv_dsr_min: 0.95                # 换届要求 DSR > 此值(不放松)
   # 挑战者 = run_train.py 用"截至当下全部数据(含最近 10 天)"训练的完整模型(用户真会用的版本,
   # 不阉割);先不上线实用,先并行影子空跑;用其影子期内的真实前瞻成绩与冠军比较。
 

@@ -233,6 +233,55 @@ class TestPredictEndToEnd:
         assert table["atr_n"].notna().any() and table["stop_distance_pct"].notna().any()
 
 
+# ── 批5:CPCV 多路径换届(与影子并存;不弱化 INV-6 / 不放松门槛)────────────────
+class TestCPCV:
+    def test_build_and_evaluate(self):
+        from trading_system.model.cpcv import build_block_perf, cpcv_evaluate
+        day = pd.date_range("2020-01-06", periods=40, freq="D")
+        rows = []
+        rng = np.random.default_rng(0)
+        for d in day:
+            x = rng.normal(size=20)
+            rows.append(pd.DataFrame({"trade_date": d, "code": range(20), "s1": x, "s2": -x,
+                                      "__fwd__": x + 0.05 * rng.normal(size=20)}))
+        panel = pd.concat(rows, ignore_index=True)
+        M = build_block_perf(panel, ["s1", "s2"], "__fwd__", n_blocks=8)
+        assert M.shape == (8, 2)
+        ev = cpcv_evaluate(M)
+        assert 0.0 <= ev["pbo"] <= 1.0 and "dsr_best" in ev
+
+    def test_signal_challenger_switches(self):
+        from trading_system.model.cpcv import cpcv_switch_decision
+        rng = np.random.default_rng(0)
+        M = rng.normal(0.0, 0.005, (8, 4))
+        M[:, 0] += 0.03   # 挑战者:每块稳定强(信号)
+        M[:, 1] += 0.008  # 冠军:中等
+        dec = cpcv_switch_decision(M, pbo_max=0.30, dsr_min=0.95)
+        assert dec["pbo"] < 0.30 and dec["dsr_challenger"] > 0.95 and dec["switch"] is True
+
+    def test_noise_challenger_no_switch(self):
+        from trading_system.model.cpcv import cpcv_switch_decision
+        rng = np.random.default_rng(1)
+        M = rng.normal(0.0, 0.01, (8, 4))   # 全噪声/过拟合
+        dec = cpcv_switch_decision(M, pbo_max=0.30, dsr_min=0.95)
+        assert dec["switch"] is False        # PBO 高(≈0.5)-> 不予换届
+
+    def test_run_cpcv_and_shadow_paths(self, tmp_path):
+        import run_champion_challenger as cc
+        from trading_system.champion_challenger import ShadowPeriodResult
+        cfg = _config(tmp_path)
+        # shadow(默认)路径不变:连续 3 期不输才换
+        cfg["champion_challenger"]["validation_method"] = "shadow"
+        wins = [ShadowPeriodResult(i, 0.05, -0.02, 0.04, -0.02) for i in range(3)]
+        assert cc.run(cfg, period_results=wins)["switch"] is True
+        # cpcv 路径:信号挑战者换届;无 block_perf 报错
+        cfg["champion_challenger"]["validation_method"] = "cpcv"
+        M = np.random.default_rng(0).normal(0, 0.005, (8, 4)); M[:, 0] += 0.03; M[:, 1] += 0.008
+        assert cc.run(cfg, block_perf=M)["switch"] is True
+        with pytest.raises(ValueError):
+            cc.run(cfg)
+
+
 # ── 批3:时间衰减 / 引擎标签 / A·B·C 对比 / Optuna ──────────────────────────
 class TestTrainingUpgrades:
     def test_time_decay_weights_monotonic(self):
