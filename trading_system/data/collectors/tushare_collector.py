@@ -1,4 +1,6 @@
-"""Tushare 财报/披露采集器(软依赖,可降级)。补丁:网络路径 + 限流退避重试 + 失败抛 TushareError。
+"""Tushare 财报采集器(**仅财报**:业绩预告 + 预约披露日;软依赖,可降级)。补丁:网络路径 + 退避重试 + 失败抛 TushareError。
+
+架构纪律(用户约束):Tushare 不作信息来源,只用于财报获取;行情/退市/日历一律 BaoStock。
 
 任何 Tushare 异常(网络/token 失效/接口变更/限流)都封装为 TushareError 抛给上层;
 上层(fetch_training_data)捕获后**降级置空**披露字段、主流程照常产出行情数据集——

@@ -143,5 +143,6 @@ python -m trading_system.data.fetch_training_data --start 2019-01-01 --enable-di
 
 - **v3.1 设计文档**:本仓库实现引用 v3.1 多个章节(§1.1/§2.3/§5.x/§7.3/§10.3/§11/§12/§13/附录 B)。
   进入 Phase 0 前需要据该文档核对具体公式与阈值。
-- **Tushare token**:Phase 0 数据备源 / 披露日历需要。建议通过环境变量 `TUSHARE_TOKEN`
+- **Tushare token**:**仅用于财报获取**(业绩预告 / 预约披露日);Tushare 非信息来源,行情/交易日历/
+  ST/退市一律由 **BaoStock**(唯一信息来源)提供。建议通过环境变量 `TUSHARE_TOKEN`
   提供,或填入 `config/data.yaml`(勿提交真实 token)。

@@ -1,4 +1,7 @@
-"""BaoStock 采集器(主源)。Phase 0(任务 0.2)。对应 v3.1 §2.2。
+"""BaoStock 采集器(**唯一信息来源**:行情 / 交易日历 / ST 状态 / 退市 / 上市日)。Phase 0。对应 v3.1 §2.2。
+
+架构纪律(用户约束):本系统的"信息来源"只有 BaoStock;Tushare 仅用于财报(业绩预告/预约披露日),
+不作行情/退市/日历的备源。后复权也只用本源(INV-2,不跨源拼接复权价)。
 
 **adjustflag 复权约定(以 BaoStock 官方中文文档为准,勿被英文博客误译):**
   ``1 = 后复权(hfq)``、``2 = 前复权(qfq)``、``3 = 不复权``。
@@ -123,3 +126,22 @@ def query_trade_dates(start: str, end: str):
     df = df.rename(columns={"calendar_date": "calendar_date", "is_trading_day": "is_trading_day"})
     df["is_trading_day"] = df["is_trading_day"].astype(int).astype(bool)
     return df
+
+
+def query_stock_basic(code: str = "", code_name: str = ""):
+    """证券基本资料(BaoStock 为唯一信息来源:上市/退市状态、上市日、退市日)。
+
+    返回列:code, code_name, ipoDate, outDate, type(1 股票/2 指数/…), status(1 上市/0 退市)。
+    用途:退市股识别(status=0 / outDate 非空,回测防幸存者偏差)、次新股 60 日窗(ipoDate)。
+    **退市/ST/日历一律走 BaoStock,不用 Tushare(Tushare 仅财报)。**
+    """
+    import baostock as bs
+    import pandas as pd
+
+    rs = bs.query_stock_basic(code=code, code_name=code_name)
+    if rs.error_code != "0":
+        raise RuntimeError(f"BaoStock 基本资料查询失败: {rs.error_code} {rs.error_msg}")
+    rows = []
+    while rs.next():
+        rows.append(rs.get_row_data())
+    return pd.DataFrame(rows, columns=rs.fields)

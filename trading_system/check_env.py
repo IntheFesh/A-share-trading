@@ -46,7 +46,7 @@ REQUIRED_DEPS = (
 )
 DATASOURCE_DEPS = (
     ("baostock", True, "日线后复权主源(Phase 0;无 token)"),
-    ("tushare", False, "日线/披露日历备源(Phase 0;需 token)"),
+    ("tushare", False, "仅财报获取:业绩预告/预约披露日(Phase 0;需 token;非信息来源)"),
     ("requests", True, "腾讯/新浪盘中快照(Phase 4;Phase 0 先就位)"),
 )
 PHASE3_DEPS = (

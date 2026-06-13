@@ -9,12 +9,13 @@ store:
   partition_by: "year"          # 按年分区
 
 sources:
-  baostock:                     # 主源:日线后复权 + 交易日历(免费,无 token)
+  baostock:                     # 唯一信息来源:行情(不复权+后复权)/ 交易日历 / ST / 退市 / 上市日(免费,无 token)
     enabled: true
     note: "不支持多线程;采集用多进程或串行 + 重试"
     retry: 3
-  tushare:                      # 备源 + 披露日历 / 业绩预告 / 退市列表(需 token)
+  tushare:                      # 仅财报:业绩预告 + 预约披露日(需 token)。不作行情/退市/日历来源。
     enabled: true
+    role: "fundamentals_only"   # 仅财报获取,非信息来源(信息来源唯 BaoStock)
     # 建议用环境变量提供,勿提交真实 token。代码优先读 env TUSHARE_TOKEN,其次读此处。
     token_env: "TUSHARE_TOKEN"
     token: ""                   # TODO: Phase 0 填入(或留空走环境变量)

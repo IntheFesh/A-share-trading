@@ -5,8 +5,9 @@
 加披露(需 token,真实路径 NOT RUN):
     TUSHARE_TOKEN=xxx python -m trading_system.data.fetch_training_data --enable-disclosure
 
-数据源分级:**BaoStock=硬依赖**(login/整体失败 → 非零退出);**Tushare=软依赖**
-(任何异常 → 降级置空披露字段,行情数据照常落盘)。落盘走既有 store.py(单一出口,增量去重)。
+数据源分级:**BaoStock=唯一信息来源 + 硬依赖**(行情/日历/ST/退市;login/整体失败 → 非零退出);
+**Tushare=仅财报 + 软依赖**(只取业绩预告/预约披露日;任何异常 → 降级置空披露字段,行情照常落盘)。
+落盘走既有 store.py(单一出口,增量去重)。
 INV-2 双价格层 / INV-3 / 披露 PIT 全部沿用 Phase 0 逻辑;不另起存储、不上多线程、不伪造数据。
 NULL(未采集/未知)与 has_preann=False(已确认未发)在写入/读取时严格区分(nullable boolean)。
 """
