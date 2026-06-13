@@ -1,9 +1,10 @@
 """特征族实现。Phase 1(任务 1.2)。对应 v3.1 §7.3。
 
-各族(每日截面内秩变换 + winsorize 1%,一律用 adj 价):
-  量价基础族(含量比=当日量/过去5日均量)、趋势族、CGO 族、反转彩票族(含 MAX)、
-  过度拉升族(距 MA20/MA60 乖离、近5/10/20日涨幅截面分位、距新高天数)、涨停族、
-  相对强弱族(RPS)、基本面条件族(EP/SUE/预告哑变量)。
-
-Phase 1 落地时在本包内逐族实现并用 features.registry.register 注册。
+导入本包即把内置特征注册进 features.registry.REGISTRY。各族(每日截面秩变换 + winsorize 1%,
+一律用 adj 价):量价基础 / 趋势 / 反转彩票 / 过度拉升 / 流动性(代表性子集)。
+CGO / 换手率族需流通股本,数据补齐后再接入(families.py 内有说明)。
 """
+
+from trading_system.features.builtin import families  # noqa: F401  导入即注册
+
+__all__ = ["families"]

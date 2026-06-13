@@ -19,9 +19,35 @@ from __future__ import annotations
 
 _PHASE = "Phase 2 任务 2.2"
 
-# 注意:INV-3 的权威成交判定函数 is_tradeable_fill 在 Phase 1/2 落地于本模块。
-# 届时 labels/ 必须 `from trading_system.backtest.engine import is_tradeable_fill`,不得另写一份。
-# 现阶段尚未定义,故 tests/test_invariants.py 的 INV-3 用例会自动 skip。
+# 默认放弃高开阈值:T+1 开盘相对昨收高开 > 7% 则放弃买入(v3.1 第十一章)。
+DEFAULT_GAP_ABANDON = 0.07
+
+
+def is_tradeable_fill(
+    *,
+    open_price: float,
+    preclose: float,
+    is_one_price_limit_up: bool,
+    gap_threshold: float = DEFAULT_GAP_ABANDON,
+) -> bool:
+    """INV-3 权威成交判定(买入侧、基于价格)。labels/ 与引擎共用本函数,不得各写一份。
+
+    Phase: 落地于 Phase 2 引擎,Phase 1 标签即开始引用(INV-3)。价格层:全用 raw(INV-2)。
+    规则(T+1 开盘):
+      - 一字涨停 -> 买不进(entry_failed_limitup) -> False;
+      - 高开 (open/preclose - 1) > gap_threshold -> 放弃(entry_failed_gap) -> False;
+      - 否则价格上可成交 -> True。
+    流动性/参与量(≤竞价量 1%)是引擎用成交量做的**额外**闸门(标签侧无盘中量,无法判),
+    不在本共享函数内——共享的是"一字/高开"价格判定,这正是 INV-3 要求同源的部分。
+    """
+    if is_one_price_limit_up:
+        return False
+    if preclose <= 0:
+        raise ValueError("preclose 必须 > 0(raw 昨收)")
+    gap = open_price / preclose - 1.0
+    if gap > gap_threshold:
+        return False
+    return True
 
 
 class BacktestEngine:
