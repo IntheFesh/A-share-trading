@@ -1,30 +1,67 @@
-"""四模型基线 + 随机候选池。Phase 2(任务 2.3)。对应 v3.1 第十三章。
+"""四模型基线 + 随机候选池。Phase 2(任务 2.3)。对应 v3.1 §7.1 / 第十三章。
 
-① 候选集等权随机买入(1000 次抽样得净值分布,算策略所处分位);
-② 单最佳因子排序;③ ElasticNet 截面秩回归;④ LightGBM 回归(此处为基线,非 Phase 3 完整排序模型)。
-价格层:净值由引擎按 raw 成交记账;特征用 adj。
+① 候选集等权随机买入(抽样得净值分布,算策略所处分位);② 单最佳因子排序;
+③ ElasticNet 截面秩回归;④ LightGBM 回归(Phase 3 装好 lightgbm 后接入,见 model/)。
+复杂模型须**同时**战胜这四者方可成为 challenger。价格层:特征 adj、收益由标签按 raw 算好。
 """
 
 from __future__ import annotations
 
-_PHASE = "Phase 2 任务 2.3"
+import numpy as np
+import pandas as pd
+
+from trading_system.backtest.metrics import mean_rank_ic
 
 
-def random_candidate_baseline(*args, **kwargs):  # noqa: ANN002, ANN003
-    """① 候选集等权随机买入,返回净值分布与策略分位。"""
-    raise NotImplementedError(f"{_PHASE}:random_candidate_baseline 待实现。")
+def random_candidate_baseline(
+    candidate_returns: "np.ndarray", k: int, *, n_samples: int = 1000, seed: int = 0
+) -> np.ndarray:
+    """① 从候选集等权随机抽 k 只,重复 n_samples 次,返回组合平均收益的分布。"""
+    cr = np.asarray(candidate_returns, dtype="float64")
+    cr = cr[~np.isnan(cr)]
+    if len(cr) < k:
+        raise ValueError("候选集规模小于 k")
+    rng = np.random.default_rng(seed)
+    return np.array([rng.choice(cr, size=k, replace=False).mean() for _ in range(n_samples)])
 
 
-def single_factor_baseline(*args, **kwargs):  # noqa: ANN002, ANN003
-    """② 单最佳因子排序基线。"""
-    raise NotImplementedError(f"{_PHASE}:single_factor_baseline 待实现。")
+def strategy_percentile(strategy_return: float, dist: np.ndarray) -> float:
+    """策略收益在随机分布中的分位(0~1):越高越说明策略胜过随机。"""
+    return float((np.asarray(dist) < strategy_return).mean())
 
 
-def elasticnet_baseline(*args, **kwargs):  # noqa: ANN002, ANN003
-    """③ ElasticNet 截面秩回归基线。"""
-    raise NotImplementedError(f"{_PHASE}:elasticnet_baseline 待实现。")
+def single_factor_baseline(
+    df: pd.DataFrame, feature_cols: "list[str]", label_col: str, *, date_col: str = "trade_date"
+) -> "tuple[str, float]":
+    """② 选 |mean RankIC| 最大的单因子作基线。返回 (因子名, 其带符号 RankIC)。"""
+    best_name, best_ic, best_abs = None, 0.0, -1.0
+    for col in feature_cols:
+        ic = mean_rank_ic(df.dropna(subset=[col, label_col]), col, label_col, date_col=date_col)
+        if np.isfinite(ic) and abs(ic) > best_abs:
+            best_name, best_ic, best_abs = col, ic, abs(ic)
+    return best_name, best_ic
 
 
-def lightgbm_regression_baseline(*args, **kwargs):  # noqa: ANN002, ANN003
-    """④ LightGBM 回归基线(非 Phase 3 完整排序模型)。"""
-    raise NotImplementedError(f"{_PHASE}:lightgbm_regression_baseline 待实现。")
+def elasticnet_baseline(
+    df: pd.DataFrame,
+    feature_cols: "list[str]",
+    label_col: str,
+    *,
+    date_col: str = "trade_date",
+    alpha: float = 0.01,
+    l1_ratio: float = 0.5,
+) -> "tuple[float, np.ndarray]":
+    """③ ElasticNet 截面秩回归基线:用(已秩变换的)特征拟合标签,返回 (预测分的 mean RankIC, 系数)。
+
+    说明:此处为同窗拟合的基线参照(非样本外);Phase 3 的正式评估走 purged walk-forward。
+    """
+    from sklearn.linear_model import ElasticNet
+
+    sub = df.dropna(subset=[*feature_cols, label_col]).copy()
+    X = sub[feature_cols].to_numpy(dtype="float64")
+    y = sub[label_col].to_numpy(dtype="float64")
+    model = ElasticNet(alpha=alpha, l1_ratio=l1_ratio, fit_intercept=True, max_iter=5000)
+    model.fit(X, y)
+    sub["__pred__"] = model.predict(X)
+    ic = mean_rank_ic(sub, "__pred__", label_col, date_col=date_col)
+    return ic, model.coef_
