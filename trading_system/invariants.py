@@ -125,6 +125,23 @@ def _round_half_up_2(x: float) -> float:
     return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def round_half_up_2(x):
+    """向量化的 0.01 半进位取整。标量走 Decimal 权威实现;数组走 numpy 近似。
+
+    数组路径用 ``floor(x*100 + 0.5 + eps)/100``;``eps`` 抵消浮点把 ``.xx5`` 表示成
+    ``.xx4999`` 的下偏(eps=1e-6 个分位 = 1e-8 元,远小于 0.01 元 tick)。
+    其与 Decimal 标量实现的一致性由 tests/test_phase0_data.py 在大量取值上锚定。
+    numpy 为惰性导入,保持本模块(系统宪法)在无重型依赖时仍可 import。
+    """
+    import numpy as np
+
+    arr = np.asarray(x, dtype="float64")
+    if arr.ndim == 0:
+        return _round_half_up_2(float(arr))
+    scaled = arr * 100.0
+    return np.floor(scaled + 0.5 + 1e-6) / 100.0
+
+
 def limit_up_price(preclose_raw: float, ratio: float = 0.10) -> float:
     """INV-2:涨停价 = ``round(原始昨收 * (1 + ratio), 2)``。**必须用 raw 昨收。**
 
