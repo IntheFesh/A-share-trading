@@ -55,12 +55,21 @@ def is_tradeable_fill(
     return True
 
 
-def compute_atr(bars: pd.DataFrame, period: int = 14) -> pd.Series:
-    """ATR(N):真实波幅的滚动均值。用 raw OHLC + raw 昨收(INV-2)。"""
+def compute_atr(bars: pd.DataFrame, period: int = 14, *, robust: bool = False,
+                winsor_q: float = 0.99) -> pd.Series:
+    """ATR(N):真实波幅的滚动均值。用 raw OHLC + raw 昨收(INV-2)。
+
+    robust=True:把真实波幅 TR 在序列上截断到 winsor_q 分位上限,抑制后复权边界等单点异常把
+    止盈止损跨度带歪(数据不删除,仅在使用环节稳健化,可追溯)。默认 False(引擎行为不变);
+    仅在传入的 bars 已按 point-in-time 截断时使用(如 run_predict 用截至 asof 的数据)。
+    """
     high = bars["high_raw"].to_numpy(dtype="float64")
     low = bars["low_raw"].to_numpy(dtype="float64")
     prev_close = bars["preclose_raw"].to_numpy(dtype="float64")
     tr = np.maximum.reduce([high - low, np.abs(high - prev_close), np.abs(low - prev_close)])
+    if robust and np.isfinite(tr).any():
+        cap = np.nanquantile(tr, winsor_q)
+        tr = np.minimum(tr, cap)
     return pd.Series(tr, index=bars.index).rolling(period).mean()
 
 

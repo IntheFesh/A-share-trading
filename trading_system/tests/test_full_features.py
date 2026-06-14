@@ -211,6 +211,49 @@ class TestWalkForward:
         assert res["n_trades"] > 0
         assert np.isfinite(res["net_return"]) and res["net_return"] <= res["nominal_return"] + 1e-9
 
+    def test_weighted_differs_from_equal(self):
+        # 5 只票各以不同恒定日收益生成;score=按 code 序固定,保证 top-3 名次稳定且收益各异
+        cal = synthetic.make_calendar("2020-01-06", 40)
+        rets = {f"60000{i}": (i - 2) * 0.004 for i in range(5)}
+        rows = []
+        for code, r in rets.items():
+            closes = 10.0 * np.cumprod(np.full(len(cal.dates), 1.0 + r))
+            for j, d in enumerate(cal.dates):
+                pc = 10.0 if j == 0 else closes[j - 1]
+                rows.append(dict(code=code, trade_date=pd.Timestamp(d), open_raw=pc,
+                                 high_raw=max(pc, closes[j]), low_raw=min(pc, closes[j]),
+                                 close_raw=closes[j], preclose_raw=pc, volume=1e4,
+                                 amount=1e4 * closes[j], adj_factor=1.0))
+        panel = pl.build_price_layers(pd.DataFrame(rows))
+        panel["__score__"] = panel["code"].map({c: r for c, r in rets.items()})  # 名次稳定
+        eq = walk_forward_backtest(panel, "__score__", top_k=3, cost_fraction=0.001)
+        wt = walk_forward_backtest(panel, "__score__", top_k=3, weights=[0.5, 0.3, 0.2],
+                                   cost_fraction=0.001)
+        assert eq["n_trades"] > 0 and wt["n_trades"] > 0
+        assert np.isfinite(eq["net_return"]) and np.isfinite(wt["net_return"])
+        assert abs(eq["net_return"] - wt["net_return"]) > 1e-9   # 加权与等权结果不同
+
+    def test_risk_mode_weighting_properties(self):
+        # 批4:逆 ATR 反波动权重 × 总敞口,逐票单股上限截断,不补杠杆(runner risk 模式同公式)
+        from trading_system.portfolio import inverse_atr_weights
+        atrs = np.array([0.2, 0.4, 0.8])
+        # 不触发单股上限时:ATR 越大权重越低,且总和=总敞口
+        rel = inverse_atr_weights(atrs)
+        w = np.minimum(rel * 0.3, 0.3)
+        assert w[0] > w[1] > w[2] and abs(w.sum() - 0.3) < 1e-12
+        # 触发单股上限时:每票 ≤ 上限,总和 ≤ 总敞口(不补杠杆)
+        w2 = np.minimum(inverse_atr_weights(atrs) * 0.5, 0.08)
+        assert (w2 <= 0.08 + 1e-12).all() and w2.sum() <= 0.5 + 1e-12
+
+    def test_risk_mode_runs(self):
+        cal = synthetic.make_calendar("2020-01-06", 40)
+        panel = pl.build_price_layers(synthetic.make_raw_panel(
+            [f"60000{i}" for i in range(8)], cal, seed=5)).copy()
+        panel["__score__"] = np.random.default_rng(3).normal(size=len(panel))
+        res = walk_forward_backtest(panel, "__score__", top_k=3, cost_fraction=0.001,
+                                    position_mode="risk", total_exposure_cap=0.5, single_cap=0.08)
+        assert res["n_trades"] > 0 and np.isfinite(res["net_return"])
+
 
 # ── 质检新项 ────────────────────────────────────────────────────────────────
 class TestQualityMonotonic:
@@ -223,3 +266,62 @@ class TestQualityMonotonic:
         bad = good.copy()
         bad.loc[bad.index[5], "adj_factor"] = 0.5             # 人为下降
         assert q.check_adj_factor_monotonic(bad).status == q.WARN
+
+
+# ── 1E-5:数据质量诊断 + ATR 稳健化 ─────────────────────────────────────────
+class TestDataQuality1E:
+    def test_diagnose_adj_continuity_lists_anomalies(self):
+        cal = synthetic.make_calendar("2020-01-06", 30)
+        panel = pl.build_price_layers(synthetic.make_raw_panel(["600000"], cal, seed=2))
+        bad = panel.sort_values("trade_date").reset_index(drop=True)
+        bad.loc[15, "close_adj"] = bad.loc[15, "close_adj"] * 1.6  # +60% 非除权/非涨跌停/非停牌
+        flagged = q.diagnose_adj_continuity(bad)
+        assert len(flagged) >= 1
+        r0 = flagged.iloc[0]
+        assert (not r0["ex_div"]) and (not r0["at_limit"]) and (not r0["gap"])
+        assert set(["code", "trade_date", "adj_ret"]).issubset(flagged.columns)
+
+    def test_robust_atr_caps_spike(self):
+        from trading_system.backtest.engine import compute_atr
+        dates = synthetic.make_calendar("2020-01-06", 40).dates
+        rows, prev = [], 10.0
+        for j, d in enumerate(dates):
+            c = prev * 1.005
+            hi, lo = c * 1.005, prev * 0.995              # 正常日 TR 很小
+            if j == 36:
+                hi, lo = c * 1.5, prev * 0.5               # 末段单点异常巨幅 TR
+            rows.append(dict(code="600000", trade_date=pd.Timestamp(d), open_raw=prev,
+                             high_raw=round(hi, 2), low_raw=round(lo, 2), close_raw=round(c, 2),
+                             preclose_raw=round(prev, 2), volume=1e4, amount=1e4 * c,
+                             adj_factor=1.0, turn=1.0))
+            prev = c
+        bars = pl.build_price_layers(pd.DataFrame(rows))
+        plain = compute_atr(bars, 14).iloc[-1]
+        robust = compute_atr(bars, 14, robust=True, winsor_q=0.9).iloc[-1]
+        assert robust < plain   # 稳健化把单点异常 TR 截断 -> ATR 不被带歪
+
+
+# ── 特征/标签缓存(命中=重算一致)────────────────────────────────────────────
+class TestFeatureCache:
+    def test_cache_hit_equals_recompute(self, tmp_path):
+        from trading_system.feature_cache import FeatureCache, compute_features_cached
+        from trading_system.features.registry import compute_feature
+
+        cal = synthetic.make_calendar("2020-01-06", 60)
+        panel = pl.build_price_layers(synthetic.make_raw_panel(["600000", "600001"], cal, seed=9))
+        feats = ["ret_5", "ma_ratio_20"]
+        work = panel.sort_values(["code", "trade_date"]).reset_index(drop=True)
+        direct = {f: compute_feature(f, work).reindex(work.index).to_numpy() for f in feats}
+
+        cache = FeatureCache(tmp_path / "c", enabled=True)
+        w1 = compute_features_cached(work.copy(), feats, cache)   # 写缓存
+        w2 = compute_features_cached(work.copy(), feats, cache)   # 读缓存(命中)
+        for f in feats:
+            assert np.allclose(w1[f].to_numpy(), direct[f], equal_nan=True)
+            assert np.allclose(w2[f].to_numpy(), direct[f], equal_nan=True)   # 命中=重算
+
+    def test_cache_disabled_is_noop(self, tmp_path):
+        from trading_system.feature_cache import FeatureCache
+        cache = FeatureCache(tmp_path / "c", enabled=False)
+        cache.put("k", pd.DataFrame({"a": [1]}))
+        assert cache.get("k") is None                            # 关闭时不读写

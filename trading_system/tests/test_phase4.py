@@ -72,6 +72,9 @@ class TestPlaybook:
         table, md = generate_playbook(candidates, regime, trade_date="2026-06-12",
                                       out_dir=tmp_path, print_console=False)
         assert list(table.columns) == list(PLAYBOOK_COLUMNS)   # 字段齐全
+        # 仓位参考指标列齐备
+        for col in ("atr_n", "single_cap_pct", "kelly_suggest_pct", "stop_distance_pct", "amihud_illiq"):
+            assert col in PLAYBOOK_COLUMNS and col in table.columns
         assert (tmp_path / "playbook_2026-06-12.csv").exists()
         assert (tmp_path / "playbook_2026-06-12.md").exists()
         assert "T_t = 0.72" in md and "阶段 = 3" in md          # 页脚 regime 摘要

@@ -15,6 +15,11 @@ venv/
 *.duckdb
 *.duckdb.wal
 
+# 训练特征/标签缓存(批2;可重算,勿入库)
+train_cache/
+trading_models/
+trading_output/
+
 # 运行期数据落盘(永不入库:体积大且可由数据源重建)
 # 注意:用 data_store/* 而非 data_store/,否则无法再 include .gitkeep(父目录被整体排除)。
 data_store/*

@@ -27,28 +27,37 @@ from trading_system.config import load_config
 logger = logging.getLogger("run_champion_challenger")
 
 
-def run(config: dict, *, period_results: "list[ShadowPeriodResult]",
-        champion="champion", challenger="challenger") -> dict:
-    # 影子期长度/换届连胜数在 config.yaml 中修改,请勿在此硬改
-    required = int(config["champion_challenger"]["switch_requires_consecutive"])
-    decision = decide_switch(period_results, required)
-    in_use = model_in_use(champion, challenger, decision)
-    # 留痕
+def run(config: dict, *, period_results: "list[ShadowPeriodResult] | None" = None,
+        champion="champion", challenger="challenger", block_perf=None) -> dict:
+    # 验证方式/连胜数/CPCV 门槛在 config.yaml 中修改,请勿在此硬改
+    cc = config["champion_challenger"]
+    method = cc.get("validation_method", "shadow")
+    if method == "cpcv":
+        # CPCV 多路径裁决(新增并行路径;不弱化 INV-6、不放松 PBO/DSR 门槛)
+        from trading_system.model.cpcv import cpcv_switch_decision
+        if block_perf is None:
+            raise ValueError("validation_method=cpcv 需提供 block_perf(块×候选 绩效矩阵)")
+        decision = cpcv_switch_decision(block_perf, pbo_max=float(cc.get("cpcv_pbo_max", 0.30)),
+                                        dsr_min=float(cc.get("cpcv_dsr_min", 0.95)))
+        streak_info = {"pbo": decision["pbo"], "dsr_challenger": decision["dsr_challenger"]}
+    else:
+        required = int(cc["switch_requires_consecutive"])
+        if period_results is None:
+            raise ValueError("validation_method=shadow 需提供 period_results")
+        decision = decide_switch(period_results, required)
+        streak_info = {"required_consecutive": required, "trailing_streak": decision["trailing_streak"]}
+
+    in_use = model_in_use(champion, challenger, decision)  # 赢了才换,没赢维持冠军(两法一致)
     out = Path(config["paths"]["output_dir"])
     out.mkdir(parents=True, exist_ok=True)
-    rec = {
-        "required_consecutive": required,
-        "trailing_streak": decision["trailing_streak"],
-        "switch": decision["switch"],
-        "in_use_after": in_use,
-        "periods": [vars(r) for r in period_results],
-    }
+    rec = {"validation_method": method, "switch": decision["switch"], "in_use_after": in_use,
+           **streak_info,
+           "periods": [vars(r) for r in period_results] if period_results else None}
     (out / "champion_challenger_decision.json").write_text(
-        json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("连胜=%d / 需要=%d → 换届=%s;当前在用=%s",
-                decision["trailing_streak"], required, decision["switch"], in_use)
-    logger.info("诚实提示:10 个交易日样本小、单期运气大,故采用连续多期累计判定;"
-                "影子期成绩在有真实市场数据前不代表真实有效性。")
+        json.dumps(rec, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    logger.info("验证方式=%s → 换届=%s;当前在用=%s", method, decision["switch"], in_use)
+    logger.info("诚实提示:换届永远由绩效是否真的更好决定,绝不到期强制换届;"
+                "样本小/单期运气大,故 shadow 用连续多期累计、cpcv 用多路径分布 + PBO/DSR 门槛。")
     return rec
 
 

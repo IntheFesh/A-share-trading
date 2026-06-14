@@ -4,16 +4,16 @@
 labels:
   # 生产可交易标签 y_prod:raw 价、tau_exit >= t+2、扣成本(INV-1)
   production_min_exit_offset: 2
-  # 固定窗口对照 y_h
+  # 固定窗口对照 y_h(注:H_max 已统一为 25 交易日,这些是短窗对照口径,非持有上限)
   fixed_horizons: [1, 2, 3, 5, 8, 10]
   # 诊断标签 y_mtm0(h=0):单独命名空间,禁止进训练/回测/审批(INV-1)
   diagnostic_h0_enabled: true
 
 # Purging / embargo(INV 核心):embargo = H_max + K_limitdown + 1
 embargo:
-  h_max: 10                    # 最大标签窗
+  h_max: 25                    # 最大标签窗 = H_max(持有期统一为 25 交易日)
   k_limitdown: 2               # 连续跌停顺延
-  gap: 13                      # = h_max + k_limitdown + 1(留给 purged CV 的间隔)
+  gap: 28                      # = h_max(25) + k_limitdown(2) + 1(留给 purged CV 的间隔)
 
 cv:
   scheme: "purged_time_series" # 训练/验证间留 embargo;标签窗重叠样本必须 purge

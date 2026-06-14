@@ -21,7 +21,7 @@ take_profit:
 
 # 时间止损 / 最大持有
 time_stop:
-  max_holding_days: 10         # 最大持有 H(=H_max,与 embargo 关联)  # TODO: Phase 2 自验
+  max_holding_days: 25         # 一笔交易最长持有的交易日数 = H_max(用户实际短线打法上限 25);与 embargo 联动
 
 # 跌停顺延 / 停牌顺延相关
 delay:
