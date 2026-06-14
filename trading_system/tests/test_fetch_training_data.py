@@ -6,13 +6,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from trading_system.data import fetch_training_data as ftd
+from trading_system.data.collectors import baostock_collector as bcoll
 from trading_system.data.collectors.baostock_collector import BaostockCollector
 from trading_system.data.price_layers import attach_disclosure_fields, build_price_layers
 from trading_system.data.schema import RAW_INPUT_FIELDS
@@ -188,3 +191,171 @@ def test_pit_null_vs_false_distinguished(tmp_path):
 def test_real_baostock_universe_listing_not_run():
     pytest.importorskip("baostock", reason="未安装 baostock;真实交易池/行情拉取见 fetch_training_data 实跑")
     pytest.skip("BaoStock 真实会话需网络,离线不验;真实采集留给用户运行 fetch_training_data。")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 健壮取数:超时跳过 + 分批落盘 + 失败重拉 + 断点续传(全 mock,网络路径 NOT RUN)
+# ════════════════════════════════════════════════════════════════════════════
+class ScriptedBC:
+    """可编排的假采集器:按 (code -> 失败轮次) 模拟单票超时/失败,并记录每次 fetch_many 调用。
+
+    fail_counts[code]=k:该票在前 k 次 fetch_many 调用里返回到 failed(模拟超时被看门狗跳过),
+    第 k+1 次起成功。run_fetch 会先分批拉(第一轮),再对待拉列表重拉一轮——故 k=1 测"重拉成功",
+    k 很大(如 99)测"重拉仍失败→最终失败报告,不无限重试"。
+    """
+
+    def __init__(self, panels_by_code, *, fail_counts=None, login_raises=False):
+        self.panels = panels_by_code
+        self.login_raises = login_raises
+        self._remaining = dict(fail_counts or {})
+        self.calls: list[list[str]] = []          # 每次 fetch_many 的入参 codes(顺序)
+        self.received_start = None                 # 最近一次 fetch_many 的 start_by_code
+        self.universe = list(panels_by_code)
+
+    def __enter__(self):
+        if self.login_raises:
+            raise RuntimeError("baostock login failed (mock)")
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def list_universe(self, day, *, boards=("60", "000")):
+        return list(self.universe)
+
+    def fetch_many(self, codes, start_by_code, end):
+        self.received_start = (dict(start_by_code) if isinstance(start_by_code, dict)
+                               else start_by_code)
+        self.calls.append(list(codes))
+        frames, failed = [], []
+        for c in codes:
+            if self._remaining.get(c, 0) > 0:      # 本轮仍判失败(模拟超时跳过)
+                self._remaining[c] -= 1
+                failed.append(c)
+                continue
+            if c in self.panels:
+                frames.append(self.panels[c])
+        panel = (pd.concat(frames, ignore_index=True) if frames
+                 else pd.DataFrame(columns=list(RAW_INPUT_FIELDS)))
+        return panel, failed
+
+
+# ── 7) 单票超时看门狗:挂起的票被跳过,正常票成功,整批不卡死 ──────────────────
+def test_request_timeout_watchdog_skips_hanging_code():
+    def fetch_fn(code, start, end):
+        if code == "sh.600999":
+            time.sleep(2.0)                        # 模拟请求挂起,远超看门狗超时
+        return _raw(code, _DATES)
+
+    bc = BaostockCollector(login_fn=lambda: None, logout_fn=lambda: None,
+                           fetch_fn=fetch_fn, all_stock_fn=lambda d: pd.DataFrame(),
+                           max_retries=1, sleep_sec=0.0, request_timeout_sec=0.2)
+    t0 = time.time()
+    panel, failed = bc.fetch_many(["sh.600999", "sh.600000"], "2020-01-01", "2020-12-31")
+    elapsed = time.time() - t0
+    assert "sh.600999" in failed                   # 超时票被跳过,计入 failed
+    assert "sh.600000" not in failed               # 正常票成功
+    assert set(panel["code"]) == {"sh.600000"}
+    assert elapsed < 2.0                            # 看门狗生效:没等满 2s,整批未卡死
+
+
+# ── 8) 看门狗工具函数:超时抛 TimeoutError;快路径透传返回值/内部异常;<=0 关闭 ──
+def test_call_with_timeout_semantics():
+    with pytest.raises(TimeoutError):
+        bcoll._call_with_timeout(lambda: time.sleep(1.0), (), 0.1)
+    assert bcoll._call_with_timeout(lambda x: x + 1, (41,), 1.0) == 42   # 透传返回
+
+    def boom():
+        raise ValueError("inner-error")
+    with pytest.raises(ValueError, match="inner-error"):                 # 透传内部异常
+        bcoll._call_with_timeout(boom, (), 1.0)
+    assert bcoll._call_with_timeout(lambda: 7, (), 0) == 7               # timeout<=0 同步直调
+
+
+# ── 9) 分批落盘 + 待拉列表 + 重拉成功:全部票最终落盘,无重复,pending 清空 ─────
+def test_batch_save_pending_then_retry_success(tmp_path):
+    codes = ["sh.600000", "sh.600001", "sh.600002"]
+    panels = {c: _raw(c, _DATES) for c in codes}
+    bc = ScriptedBC(panels, fail_counts={"sh.600001": 1})   # 第一轮失败,重拉成功
+    store = ParquetStore(tmp_path / "store")
+    out = tmp_path / "out"
+    rc = ftd.run_fetch(universe_codes=codes, baostock_collector=bc, store=store,
+                       enable_disclosure=False, incremental=True,
+                       batch_save_size=2, output_dir=out)
+    assert rc == 0
+    back = store.read(codes=codes)
+    assert set(back["code"]) == set(codes)                  # 三只票都落盘(含重拉成功的)
+    assert not back.duplicated(subset=["code", "trade_date"]).any()   # 无重复
+    # 分批:chunk1=[600000,600001]、chunk2=[600002],再重拉 [600001]
+    assert bc.calls == [["sh.600000", "sh.600001"], ["sh.600002"], ["sh.600001"]]
+    pend = json.loads((out / "pending_codes.json").read_text(encoding="utf-8"))
+    assert pend["codes"] == []                              # 全部拉到 → 待拉清空
+    assert not (out / "failed_codes.json").exists()         # 无最终失败
+
+
+# ── 10) 重拉仍失败:记入 failed_codes.json,日志列出,只重拉一次(不无限重试)──
+def test_permanent_failure_recorded_and_retried_once(tmp_path, caplog):
+    codes = ["sh.600000", "sh.600001"]
+    panels = {c: _raw(c, _DATES) for c in codes}
+    bc = ScriptedBC(panels, fail_counts={"sh.600001": 99})  # 永远失败
+    store = ParquetStore(tmp_path / "store")
+    out = tmp_path / "out"
+    with caplog.at_level(logging.ERROR):
+        rc = ftd.run_fetch(universe_codes=codes, baostock_collector=bc, store=store,
+                           enable_disclosure=False, incremental=True,
+                           batch_save_size=10, output_dir=out)
+    assert rc == 0                                          # 非全失败 → 不硬退(仅告警)
+    assert set(store.read(codes=codes)["code"]) == {"sh.600000"}      # 失败票未落盘
+    failed = json.loads((out / "failed_codes.json").read_text(encoding="utf-8"))
+    assert failed["codes"] == ["sh.600001"]                # 确未拉到,写入最终失败报告
+    assert bc.calls == [["sh.600000", "sh.600001"], ["sh.600001"]]   # 只重拉一次,非无限
+    assert any("sh.600001" in m for m in caplog.messages)  # 日志明确列出失败票
+
+
+# ── 11) 断点续传:中断后重跑(增量),已落盘票跳过、未拉票从头补,最终完整无重复 ──
+def test_resume_after_interruption_incremental(tmp_path):
+    codes = ["sh.600000", "sh.600001"]
+    panels = {c: _raw(c, _DATES) for c in codes}
+    store = ParquetStore(tmp_path / "store")
+    out = tmp_path / "out"
+
+    # 第一次:模拟 600001 拉取失败(中断/未落盘),600000 已落盘
+    bc1 = ScriptedBC(panels, fail_counts={"sh.600001": 99})
+    rc1 = ftd.run_fetch(universe_codes=codes, baostock_collector=bc1, store=store,
+                        enable_disclosure=False, incremental=True,
+                        batch_save_size=10, output_dir=out)
+    assert rc1 == 0
+    assert set(store.read(codes=codes)["code"]) == {"sh.600000"}      # 仅 600000 落盘
+
+    # 重跑(增量):600001 这次成功;600000 已是最新 → 起点=本地最新+1(被跳过补拉)
+    bc2 = ScriptedBC(panels)
+    rc2 = ftd.run_fetch(universe_codes=codes, baostock_collector=bc2, store=store,
+                        enable_disclosure=False, incremental=True,
+                        batch_save_size=10, output_dir=out)
+    assert rc2 == 0
+    a_next = (pd.Timestamp(_DATES[-1]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    assert bc2.received_start["sh.600000"] == a_next       # 已落盘票:从最新+1 起(不重复拉历史)
+    assert bc2.received_start["sh.600001"] == "2019-01-01"  # 未拉票:从 config.start 起
+    back = store.read(codes=codes)
+    assert set(back["code"]) == set(codes)                 # 两只票最终都在
+    assert not back.duplicated(subset=["code", "trade_date"]).any()   # 不重复
+    assert back[back["code"] == "sh.600001"]["trade_date"].nunique() == len(_DATES)  # 不丢失
+
+
+# ── 12) 分批落盘 == 一次性落盘:多批结果与单批严格一致(不漏、不重、双价格层完整)──
+def test_batched_equals_single_save(tmp_path):
+    codes = [f"sh.60000{i}" for i in range(6)]
+    panels = {c: _raw(c, _DATES, factor=1.5) for c in codes}
+
+    single = ParquetStore(tmp_path / "single")
+    ftd.run_fetch(universe_codes=codes, baostock_collector=ScriptedBC(panels), store=single,
+                  enable_disclosure=False, incremental=True,
+                  batch_save_size=999, output_dir=tmp_path / "o1")        # 单批
+    batched = ParquetStore(tmp_path / "batched")
+    ftd.run_fetch(universe_codes=codes, baostock_collector=ScriptedBC(panels), store=batched,
+                  enable_disclosure=False, incremental=True,
+                  batch_save_size=2, output_dir=tmp_path / "o2")          # 分 3 批
+
+    a = single.read(codes=codes).sort_values(["code", "trade_date"]).reset_index(drop=True)
+    b = batched.read(codes=codes).sort_values(["code", "trade_date"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(a, b)                    # 分批与一次性逐格相等

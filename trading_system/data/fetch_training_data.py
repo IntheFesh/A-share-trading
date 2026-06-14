@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import logging
 import os
 import sys
@@ -26,7 +27,10 @@ import pandas as pd
 
 from trading_system.data import quality
 from trading_system.data.calendar import TradingCalendar
-from trading_system.data.collectors.baostock_collector import BaostockCollector
+from trading_system.data.collectors.baostock_collector import (
+    DEFAULT_REQUEST_TIMEOUT_SEC,
+    BaostockCollector,
+)
 from trading_system.data.collectors.tushare_collector import TushareCollector
 from trading_system.data.price_layers import attach_disclosure_fields, build_price_layers
 from trading_system.data.schema import DISCLOSURE_FIELDS
@@ -35,6 +39,77 @@ from trading_system.data.store import ParquetStore
 logger = logging.getLogger("fetch_training_data")
 
 DEFAULT_STORE_PATH = Path(__file__).resolve().parents[2] / "data_store"
+
+# 每拉 N 只票落盘一次(分批落盘默认批大小);中途中断不丢已落盘批次,天然支持断点续传。
+DEFAULT_BATCH_SAVE_SIZE = 200
+# 待拉/失败代码清单文件名(落盘到 output_dir;崩溃可见,便于人工核对)。
+PENDING_FILE = "pending_codes.json"
+FAILED_FILE = "failed_codes.json"
+
+
+def _chunked(seq: "list[str]", n: int):
+    """把代码列表切成每段至多 n 只(分批落盘单位)。"""
+    for i in range(0, len(seq), n):
+        yield seq[i : i + n]
+
+
+def _write_codes_json(path: "str | Path", codes, *, note: str = "") -> None:
+    """落盘待拉/失败代码清单(崩溃可见)。断点续传靠 store 主键去重自动完成,不依赖本文件;
+    本文件仅供人工核对"哪些票还没拉到"。落盘失败不中断采集主流程。"""
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+            "count": len(set(codes)),
+            "codes": sorted(set(codes)),
+            "note": note,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as e:  # noqa: BLE001 — 清单落盘失败不应拖垮行情采集
+        logger.warning("写代码清单失败 %s: %r", path, e)
+
+
+def _attach_disclosure(
+    panel: pd.DataFrame, *, codes, start, end, enable_disclosure, tushare_token,
+    tushare_collector_factory,
+) -> "tuple[pd.DataFrame, str]":
+    """披露字段附加(软依赖,失败降级)。返回 (面板, disclosure_status)。与原内联逻辑等价。"""
+    if not enable_disclosure:
+        return _with_null_disclosure(panel), "disabled"
+    token = tushare_token or os.environ.get("TUSHARE_TOKEN")
+    if not token:
+        logger.warning("启用了披露但无 Tushare token → 跳过披露采集,披露字段置 NULL,主流程继续。")
+        return _with_null_disclosure(panel), "skipped_no_token"
+    factory = tushare_collector_factory or (lambda tk: TushareCollector(tk))
+    try:
+        tc = factory(token)
+        sched, preann = tc.fetch_disclosure(codes, start, end)
+        cal = TradingCalendar(sorted(pd.to_datetime(panel["trade_date"]).unique()))
+        panel = attach_disclosure_fields(panel, sched_disclosure=sched, preann=preann, calendar=cal)
+        panel = _coerce_disclosure_for_storage(panel)
+        return panel, "collected"
+    except Exception as e:  # noqa: BLE001 — 任何 Tushare 异常 → 降级,绝不丢行情
+        logger.warning("Tushare 采集失败,降级置空披露字段,主流程继续。原因=%r", e)
+        return _with_null_disclosure(panel), "failed_degraded"
+
+
+def _summarize_quality(batches: "list[list]") -> "tuple[bool, list]":
+    """汇总(可能分批的)质检结果:同名检查合并 n_flagged、取最差状态。返回 (有无FAIL, 汇总列表)。"""
+    order = {quality.PASS: 0, quality.SKIP: 0, quality.WARN: 1, quality.FAIL: 2}
+    agg: "dict[str, quality.CheckResult]" = {}
+    for batch in batches:
+        for r in batch:
+            cur = agg.get(r.check)
+            if cur is None:
+                agg[r.check] = quality.CheckResult(r.check, r.status, r.n_flagged, r.detail)
+            else:
+                cur.n_flagged += r.n_flagged
+                if order.get(r.status, 0) > order.get(cur.status, 0):
+                    cur.status, cur.detail = r.status, r.detail
+    merged = list(agg.values())
+    has_fail = any(r.status == quality.FAIL for r in merged)
+    return has_fail, merged
 
 
 def _with_null_disclosure(panel: pd.DataFrame) -> pd.DataFrame:
@@ -98,14 +173,65 @@ def run_fetch(
     universe_day: "str | None" = None,
     fail_rate_threshold: float = 0.05,
     limit: "int | None" = None,
+    request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
+    batch_save_size: int = DEFAULT_BATCH_SAVE_SIZE,
+    output_dir: "str | Path | None" = None,
 ) -> int:
-    """采集主流程(依赖可注入,便于离线测试)。返回进程退出码:0 成功 / 2 行情硬失败。"""
+    """采集主流程(依赖可注入,便于离线测试)。返回进程退出码:0 成功 / 2 行情硬失败。
+
+    健壮机制(防全量拉取卡死/丢数据):
+      1) 单票超时看门狗:由注入/默认的 BaostockCollector(request_timeout_sec) 实现,超时跳过该票。
+      2) 分批落盘:每 batch_save_size 只票落盘一次(默认主路径=增量+无披露,走 update_incremental)。
+      3) 待拉列表 + 失败重拉:超时/失败的票记入 output_dir/pending_codes.json,全部拉完后自动重拉一轮;
+         仍失败者写 output_dir/failed_codes.json 并日志列出(不伪成功、不无限重试)。
+      4) 断点续传:分批落盘 + 增量去重 → 中断后重跑(增量)自动跳过已落盘的票,从未拉的票继续。
+    最终数据与"理想一次性拉取"一致(按 (code,trade_date) 主键去重,双价格层完整;写入顺序无关)。
+    """
     end = end or dt.date.today().strftime("%Y-%m-%d")
     store = store or ParquetStore(out or DEFAULT_STORE_PATH)
-    bc = baostock_collector or BaostockCollector()
+    bc = baostock_collector or BaostockCollector(request_timeout_sec=request_timeout_sec)
     boards = ("60", "000")  # main_board
+    report_dir = Path(output_dir) if output_dir is not None else Path(store.root)
+    batch_save_size = max(1, int(batch_save_size))
 
-    # ── 行情(硬依赖)──
+    # 分批"即时落盘"仅用于默认主路径(增量 + 无披露):此时分批结果与一次性落盘严格一致,且天然续传。
+    # 其余模式(全量=store.write 覆盖语义;披露=需对全量面板建全局日历)→ 攒到末尾一次性处理+落盘,
+    # 语义与原实现完全一致(INV/质检/披露 PIT 不变)。两种模式都享有超时+待拉+重拉+失败报告。
+    per_batch_save = incremental and not enable_disclosure
+
+    codes: "list[str]" = []
+    total = 0
+    final_failed: "list[str]" = []
+    accumulated: "list[pd.DataFrame]" = []   # 非即时落盘模式:攒原始面板
+    batch_q: "list[list]" = []               # 即时落盘模式:逐批质检结果
+    total_written = 0
+    success_codes: set = set()
+    dmins: "list[pd.Timestamp]" = []
+    dmaxs: "list[pd.Timestamp]" = []
+    saved_any = False
+
+    def _save_batch(panel_raw: pd.DataFrame) -> None:
+        """即时落盘一批(默认主路径):双价格层 + 状态位 + 置空披露 → update_incremental。"""
+        nonlocal total_written, saved_any
+        panel = build_price_layers(panel_raw)          # INV-2 双价格层 + 状态位(与正常路径一致)
+        panel = _with_null_disclosure(panel)
+        total_written += store.update_incremental(panel)
+        success_codes.update(pd.unique(panel["code"]))
+        batch_q.append(_market_quality(panel, check_disclosure=False))
+        dmins.append(pd.to_datetime(panel["trade_date"]).min())
+        dmaxs.append(pd.to_datetime(panel["trade_date"]).max())
+        saved_any = True
+
+    def _ingest(panel_raw: pd.DataFrame) -> None:
+        """一批拉取结果入库:即时落盘模式直接落盘;否则攒起来末尾统一处理。"""
+        if panel_raw.empty:
+            return
+        if per_batch_save:
+            _save_batch(panel_raw)
+        else:
+            accumulated.append(panel_raw)
+
+    # ── 行情(硬依赖):分批拉取 + 分批落盘;login/会话失败=硬失败非零退出 ──
     try:
         with bc:
             codes = universe_codes or bc.list_universe(universe_day or end, boards=boards)
@@ -116,66 +242,82 @@ def run_fetch(
                 codes = sorted(codes)[:limit]   # 排序后取前 limit 只,保证可复现
                 logger.info("已限制交易池为前 %d 只(--limit);全量请去掉 --limit。", len(codes))
             start_by_code = _start_by_code(codes, store, start, incremental)
-            panel_raw, failed = bc.fetch_many(codes, start_by_code, end)
+            total = len(codes)
+
+            # 第一轮:分批拉取,每批落盘一次(中断不丢已落盘批次)
+            pending: "list[str]" = []
+            n_batches = (total + batch_save_size - 1) // batch_save_size
+            for bi, chunk in enumerate(_chunked(codes, batch_save_size), start=1):
+                panel_raw, failed = bc.fetch_many(chunk, start_by_code, end)
+                if failed:
+                    pending.extend(failed)
+                    _write_codes_json(report_dir / PENDING_FILE, pending,
+                                      note="超时/失败,待重拉(增量重跑会自动续传)")
+                logger.info("批 %d/%d:拉 %d 只,得 %d 行,失败 %d 只(累计待拉 %d)。",
+                            bi, n_batches, len(chunk), len(panel_raw), len(failed), len(pending))
+                _ingest(panel_raw)
+
+            # 第二轮:对"待拉列表"重拉一轮(同一会话、同样超时保护);仍失败者计入最终失败
+            if pending:
+                retry_codes = sorted(set(pending))
+                logger.info("待拉列表重拉一轮:%d 只(同样超时保护)...", len(retry_codes))
+                panel_raw2, final_failed = bc.fetch_many(retry_codes, start_by_code, end)
+                _ingest(panel_raw2)
     except Exception as e:  # noqa: BLE001 — login/会话失败=硬失败
         logger.error("BaoStock 会话/登录失败(行情硬依赖,非零退出): %r", e)
         return 2
 
-    total = len(codes)
-    if total and len(failed) == total:
-        logger.error("整体拉取失败:%d/%d 全部失败,非零退出。", len(failed), total)
+    # ── 待拉/失败列表最终落盘(pending 现在=重拉后仍失败;空=全部拉到)──
+    _write_codes_json(report_dir / PENDING_FILE, final_failed, note="重拉后仍待拉(空=全部拉到)")
+    if final_failed:
+        _write_codes_json(report_dir / FAILED_FILE, final_failed,
+                          note="重拉后仍失败:确未拉到(非伪成功);可日后增量重跑补拉")
+        shown = final_failed if len(final_failed) <= 30 else final_failed[:30] + ["...(更多见文件)"]
+        logger.error("最终失败 %d/%d 只(重拉后仍失败,已写 %s):%s",
+                     len(final_failed), total, FAILED_FILE, shown)
+
+    # ── 失败率红线(与原实现一致:全失败硬退;超阈值告警)──
+    if total and len(final_failed) == total:
+        logger.error("整体拉取失败:%d/%d 全部失败,非零退出。", len(final_failed), total)
         return 2
-    if total and len(failed) / total > fail_rate_threshold:
+    if total and len(final_failed) / total > fail_rate_threshold:
         logger.warning("行情失败率 %.1f%% 超阈值 %.0f%%(失败 %d/%d)。",
-                       100 * len(failed) / total, 100 * fail_rate_threshold, len(failed), total)
-    if panel_raw.empty:
+                       100 * len(final_failed) / total, 100 * fail_rate_threshold,
+                       len(final_failed), total)
+
+    # ── 非即时落盘模式:统一双价格层 + 披露 + 一次性落盘 + 整体质检(语义同原实现)──
+    disclosure_status = "disabled"
+    if not per_batch_save:
+        if not accumulated:
+            logger.info("无新增行情(增量无更新);本次不写入,退出 0。")
+            return 0
+        panel = build_price_layers(pd.concat(accumulated, ignore_index=True))
+        panel, disclosure_status = _attach_disclosure(
+            panel, codes=codes, start=start, end=end, enable_disclosure=enable_disclosure,
+            tushare_token=tushare_token, tushare_collector_factory=tushare_collector_factory)
+        total_written = store.update_incremental(panel) if incremental else store.write(panel)
+        success_codes.update(pd.unique(panel["code"]))
+        batch_q = [_market_quality(panel, check_disclosure=(disclosure_status == "collected"))]
+        dmins = [pd.to_datetime(panel["trade_date"]).min()]
+        dmaxs = [pd.to_datetime(panel["trade_date"]).max()]
+    elif not saved_any:
         logger.info("无新增行情(增量无更新);本次不写入,退出 0。")
         return 0
 
-    panel = build_price_layers(panel_raw)  # INV-2 双价格层 + 状态位
-
-    # ── 披露(软依赖,失败降级)──
-    disclosure_status = "disabled"
-    if enable_disclosure:
-        token = tushare_token or os.environ.get("TUSHARE_TOKEN")
-        if not token:
-            logger.warning("启用了披露但无 Tushare token → 跳过披露采集,披露字段置 NULL,主流程继续。")
-            panel = _with_null_disclosure(panel)
-            disclosure_status = "skipped_no_token"
-        else:
-            factory = tushare_collector_factory or (lambda tk: TushareCollector(tk))
-            try:
-                tc = factory(token)
-                sched, preann = tc.fetch_disclosure(codes, start, end)
-                cal = TradingCalendar(sorted(pd.to_datetime(panel["trade_date"]).unique()))
-                panel = attach_disclosure_fields(panel, sched_disclosure=sched, preann=preann,
-                                                 calendar=cal)
-                panel = _coerce_disclosure_for_storage(panel)
-                disclosure_status = "collected"
-            except Exception as e:  # noqa: BLE001 — 任何 Tushare 异常 → 降级,绝不丢行情
-                logger.warning("Tushare 采集失败,降级置空披露字段,主流程继续。原因=%r", e)
-                panel = _with_null_disclosure(panel)
-                disclosure_status = "failed_degraded"
-    else:
-        panel = _with_null_disclosure(panel)
-
-    # ── 落盘(单一出口,增量去重)──
-    written = store.update_incremental(panel) if incremental else store.write(panel)
-
-    # ── 质检 ──
-    results = _market_quality(panel, check_disclosure=(disclosure_status == "collected"))
-    q_fails = [r for r in results if r.status == quality.FAIL]
-    for r in results:
+    # ── 质检汇总(分批时合并同名检查)──
+    has_fail, merged_q = _summarize_quality(batch_q)
+    for r in merged_q:
         logger.info("质检 %s: %s (%d) %s", r.check, r.status, r.n_flagged, r.detail)
-    if q_fails:
-        logger.error("行情质检存在 FAIL:%s(数据已落盘,请复查)。", [r.check for r in q_fails])
+    if has_fail:
+        logger.error("行情质检存在 FAIL:%s(数据已落盘,请复查)。",
+                     [r.check for r in merged_q if r.status == quality.FAIL])
 
     # ── 总结 + 下一步 ──
-    dmin = pd.to_datetime(panel["trade_date"]).min().date()
-    dmax = pd.to_datetime(panel["trade_date"]).max().date()
+    dmin = min(dmins).date() if dmins else None
+    dmax = max(dmaxs).date() if dmaxs else None
     logger.info("=== 采集完成 ===")
     logger.info("行情:成功 %d 只 / 失败 %d 只;写入 %d 行;日期 %s ~ %s。",
-                total - len(failed), len(failed), written, dmin, dmax)
+                len(success_codes), len(final_failed), total_written, dmin, dmax)
     logger.info("披露:%s(disclosure 字段 %s)。", disclosure_status,
                 "已填充" if disclosure_status == "collected" else "NULL=未采集/未知")
     logger.info("落盘目录:%s", store.root)
@@ -199,6 +341,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="增量模式(默认):只拉 max(本地)+1→今日")
     inc.add_argument("--full", dest="incremental", action="store_false", help="全量重拉")
     p.add_argument("--out", default=None, help="落盘目录(默认走 store.py 既定路径)")
+    p.add_argument("--output-dir", default=None,
+                   help="待拉/失败清单(pending_codes.json/failed_codes.json)落盘目录;默认=落盘目录")
+    p.add_argument("--request-timeout-sec", type=float, default=DEFAULT_REQUEST_TIMEOUT_SEC,
+                   help="单票 BaoStock 请求超时(秒);超时跳过并记入待拉列表(防进程僵死)")
+    p.add_argument("--batch-save-size", type=int, default=DEFAULT_BATCH_SAVE_SIZE,
+                   help="每拉 N 只票落盘一次(分批落盘;中断不丢已落盘批次,支持断点续传)")
     return p
 
 
@@ -209,7 +357,8 @@ def main(argv=None) -> int:
     return run_fetch(
         start=args.start, end=args.end, universe=args.universe,
         enable_disclosure=args.enable_disclosure, tushare_token=args.tushare_token,
-        incremental=args.incremental, out=args.out,
+        incremental=args.incremental, out=args.out, output_dir=args.output_dir,
+        request_timeout_sec=args.request_timeout_sec, batch_save_size=args.batch_save_size,
     )
 
 
