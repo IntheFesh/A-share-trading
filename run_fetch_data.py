@@ -64,10 +64,13 @@ def run(config: dict, *, end=None, full: bool = False, limit=None,
         enable_disclosure=data["enable_disclosure"], incremental=not full, store=store,
         baostock_collector=baostock_collector, tushare_collector_factory=tushare_collector_factory,
         universe_codes=universe_codes, limit=limit,
-        # 健壮取数:单票超时看门狗 + 分批落盘 + 待拉/失败清单(均从 config.yaml 读,默认有兜底)
+        # 健壮取数:单票超时看门狗 + 分批落盘 + 待拉/失败清单 + 单日配额保护
+        # (均从 config.yaml 读,默认有兜底)
         request_timeout_sec=data.get("request_timeout_sec", 45),
         batch_save_size=data.get("batch_save_size", 200),
         output_dir=paths["output_dir"],
+        daily_request_limit=data.get("daily_request_limit", 50000),
+        daily_request_safety_margin=data.get("daily_request_safety_margin", 5000),
     )
     if rc == 0:
         card = build_dataset_card(store, start=data["start"], end=end, universe=config["universe"],
