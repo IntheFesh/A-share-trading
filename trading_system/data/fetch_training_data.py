@@ -36,6 +36,7 @@ from trading_system.data.collectors.tushare_collector import TushareCollector
 from trading_system.data.price_layers import attach_disclosure_fields, build_price_layers
 from trading_system.data.schema import DISCLOSURE_FIELDS
 from trading_system.data.store import ParquetStore
+from trading_system.data.universe import MAIN_BOARD_PREFIXES
 
 logger = logging.getLogger("fetch_training_data")
 
@@ -217,7 +218,7 @@ def run_fetch(
                                   safety_margin=daily_request_safety_margin)
     bc = baostock_collector or BaostockCollector(request_timeout_sec=request_timeout_sec,
                                                  quota=quota)
-    boards = ("60", "000")  # main_board
+    boards = MAIN_BOARD_PREFIXES  # 沪深主板 600/601/603/605/000/001/002(含 001/002,唯一真相源)
     report_dir = Path(output_dir) if output_dir is not None else Path(store.root)
     batch_save_size = max(1, int(batch_save_size))
 

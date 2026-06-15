@@ -1,6 +1,6 @@
 """交易池过滤。Phase 0(任务 0.5)。对应 v3.1 §1.1。价格层:状态位用 raw 派生。
 
-沪深主板(60/000 开头),剔除 ST/*ST、退市整理、停牌、上市未满 60 日次新、入场时刻一字板。
+沪深主板(600/601/603/605/000/001/002),剔除 ST/*ST、退市整理、停牌、上市未满 60 日次新、入场时刻一字板。
 退市股历史数据必须保留在 store(回测防幸存者偏差),但其退市后不进当日可交易池。
 规则阈值默认值对齐 config/data.yaml 的 universe 块(逻辑里不写死,调用方从 config 传入)。
 """
@@ -11,6 +11,12 @@ import re
 
 import numpy as np
 import pandas as pd
+
+# 沪深主板全集(用户账户可交易范围)。三位精确前缀,startswith 匹配——唯一真相源。
+# 沪市主板:600/601/603/605;深市主板:000/001/002(002 原中小板已并入深主板)。
+# 刻意排除:创业板 300/301、科创板 688、北交所 8xx/4xx/920、深B 200、沪B 900。
+# 注意:必须用三位精确前缀,不能用两位 "00"/"60"(会误收深B 200 等),逐项验证无误收无漏收。
+MAIN_BOARD_PREFIXES: "tuple[str, ...]" = ("600", "601", "603", "605", "000", "001", "002")
 
 
 def stock_code_core(code: str) -> str:
@@ -31,7 +37,7 @@ def board_allowed(code: str, boards: "tuple[str, ...] | list[str]") -> bool:
 def filter_universe(
     panel: pd.DataFrame,
     *,
-    boards: "tuple[str, ...] | list[str]" = ("60", "000"),
+    boards: "tuple[str, ...] | list[str]" = MAIN_BOARD_PREFIXES,
     exclude_st: bool = True,
     exclude_suspended: bool = True,
     new_listing_min_days: int = 60,

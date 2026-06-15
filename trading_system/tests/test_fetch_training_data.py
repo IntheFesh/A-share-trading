@@ -22,6 +22,7 @@ from trading_system.data.collectors.quota import RequestQuota
 from trading_system.data.price_layers import attach_disclosure_fields, build_price_layers
 from trading_system.data.schema import RAW_INPUT_FIELDS
 from trading_system.data.store import ParquetStore
+from trading_system.data.universe import MAIN_BOARD_PREFIXES
 
 _FIXED_UTC = lambda: datetime(2026, 6, 15, 6, 0, tzinfo=timezone.utc)  # 固定同一国内自然日
 
@@ -61,7 +62,7 @@ class FakeBC:
     def __exit__(self, *a):
         return False
 
-    def list_universe(self, day, *, boards=("60", "000")):
+    def list_universe(self, day, *, boards=MAIN_BOARD_PREFIXES):
         return self.universe
 
     def fetch_many(self, codes, start_by_code, end):
@@ -234,7 +235,7 @@ class ScriptedBC:
             self.quota.flush()
         return False
 
-    def list_universe(self, day, *, boards=("60", "000")):
+    def list_universe(self, day, *, boards=MAIN_BOARD_PREFIXES):
         return list(self.universe)
 
     def fetch_many(self, codes, start_by_code, end):

@@ -21,7 +21,7 @@ import pandas as pd
 from trading_system.data.collectors import baostock as bs_api
 from trading_system.data.collectors.quota import QuotaExceeded, RequestQuota
 from trading_system.data.schema import RAW_INPUT_FIELDS
-from trading_system.data.universe import board_allowed
+from trading_system.data.universe import MAIN_BOARD_PREFIXES, board_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +129,9 @@ class BaostockCollector:
             if self.quota is not None:
                 self.quota.flush()         # 进程退出前务必落盘,避免丢失跨进程计数
 
-    def list_universe(self, day: str, *, boards=("60", "000")) -> "list[str]":
-        """某交易日的主板非 ST 代码列表(交易池)。一次 query_all_stock 请求,计入配额。"""
+    def list_universe(self, day: str, *, boards=MAIN_BOARD_PREFIXES) -> "list[str]":
+        """某交易日的主板(600/601/603/605/000/001/002)非 ST 代码列表(交易池)。
+        一次 query_all_stock 请求,计入配额。"""
         if self.quota is not None:
             self.quota.check()             # 配额已满则不再发起(优雅停止)
         df = self.all_stock_fn(day)
