@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_system.data.schema import INDUSTRY_FIELDS
+from trading_system.data.store import atomic_write_parquet, cleanup_orphan_tmp
 
 
 class IndustryStore:
@@ -19,6 +20,7 @@ class IndustryStore:
         self.root = Path(root)
         self.compression = compression
         self.root.mkdir(parents=True, exist_ok=True)
+        cleanup_orphan_tmp(self.root)        # 清理上次中断遗留的孤儿临时文件
 
     @property
     def _file(self) -> Path:
@@ -43,5 +45,5 @@ class IndustryStore:
         combined = pd.concat([existing, new_df], ignore_index=True) if not existing.empty else new_df
         combined = combined.drop_duplicates(subset=["code"], keep="last").reset_index(drop=True)
         combined = combined.sort_values("code").reset_index(drop=True)
-        combined.to_parquet(self._file, compression=self.compression, index=False)
+        atomic_write_parquet(combined, self._file, self.compression)        # 原子写,中断不损坏
         return len(combined)

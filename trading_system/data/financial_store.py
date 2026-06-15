@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_system.data.schema import FINANCIAL_FIELDS, FINANCIAL_KEY_FIELDS
+from trading_system.data.store import atomic_write_parquet, cleanup_orphan_tmp
 
 
 class FinancialStore:
@@ -22,6 +23,7 @@ class FinancialStore:
         self.root = Path(root)
         self.compression = compression
         self.root.mkdir(parents=True, exist_ok=True)
+        cleanup_orphan_tmp(self.root)        # 清理上次中断遗留的孤儿临时文件
 
     # ── 年分区(按 statDate 年份)──
     def _year_dir(self, year: int) -> Path:
@@ -46,7 +48,7 @@ class FinancialStore:
     def _write_year(self, year: int, df: pd.DataFrame) -> None:
         self._year_dir(year).mkdir(parents=True, exist_ok=True)
         df = df.sort_values(list(FINANCIAL_KEY_FIELDS)).reset_index(drop=True)
-        df.to_parquet(self._year_file(year), compression=self.compression, index=False)
+        atomic_write_parquet(df, self._year_file(year), self.compression)   # 原子写,中断不损坏
 
     @staticmethod
     def _tag_year(df: pd.DataFrame) -> pd.DataFrame:
