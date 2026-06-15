@@ -24,6 +24,7 @@ from trading_system.data.collectors.quota import QuotaExceeded, RequestQuota
 from trading_system.data.schema import (
     FINANCIAL_FIELDS,
     FINANCIAL_NUMERIC_FIELDS,
+    INDUSTRY_FIELDS,
     RAW_INPUT_FIELDS,
 )
 from trading_system.data.universe import MAIN_BOARD_PREFIXES, board_allowed
@@ -131,6 +132,27 @@ def merge_financial(profit, growth, balance) -> "pd.DataFrame | None":
     return out
 
 
+def normalize_industry(df: "pd.DataFrame | None") -> pd.DataFrame:
+    """规整行业分类原始表为 INDUSTRY_FIELDS(code, industry, industryClassification)。
+
+    BaoStock 对未分类票返回空 industry → 统一为空串 ""(保留行,便于"已知未分类"与"未采集"区分)。
+    按 code 去重(保留首条)。空输入返回带 schema 列的空表。
+    """
+    cols = list(INDUSTRY_FIELDS)
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=cols)
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = ""
+    out = out[cols].copy()
+    out["code"] = out["code"].astype(str)
+    out["industry"] = out["industry"].fillna("").astype(str)
+    out["industryClassification"] = out["industryClassification"].fillna("").astype(str)
+    out = out[out["code"].str.len() > 0].drop_duplicates(subset=["code"], keep="first")
+    return out.reset_index(drop=True)
+
+
 class BaostockCollector:
     """BaoStock 行情采集编排。"""
 
@@ -144,6 +166,7 @@ class BaostockCollector:
         profit_fn=bs_api.query_profit,
         growth_fn=bs_api.query_growth,
         balance_fn=bs_api.query_balance,
+        industry_fn=bs_api.query_industry,
         max_retries: int = 2,
         sleep_sec: float = 0.3,
         request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
@@ -158,6 +181,7 @@ class BaostockCollector:
         self.profit_fn = profit_fn
         self.growth_fn = growth_fn
         self.balance_fn = balance_fn
+        self.industry_fn = industry_fn          # 行业分类接口(批 4)
         self.max_retries = max_retries
         self.sleep_sec = sleep_sec
         # 单票请求超时(秒);<=0 关闭看门狗(直接同步调用)。超时→视为该次失败→重试/跳过。
@@ -323,3 +347,16 @@ class BaostockCollector:
         growth = self._resilient_request(self.growth_fn, (code, year, quarter), cost=1)
         balance = self._resilient_request(self.balance_fn, (code, year, quarter), cost=1)
         return merge_financial(profit, growth, balance)
+
+    # ── 行业分类采集(批 4:基础设施,仅采集落盘,不接入打分)──────────────────
+    def fetch_industry(self, codes: "list[str] | None" = None) -> pd.DataFrame:
+        """采集申万行业分类(query_stock_industry 一次取全市场,最省请求),套超时看门狗 + 重试 + 配额。
+
+        返回 INDUSTRY_FIELDS 面板(code, industry, industryClassification)。codes 非空则过滤到这些票。
+        低频近静态:全市场一次请求即可,无需逐票。
+        """
+        df = self._resilient_request(self.industry_fn, ("",), cost=1)   # code="" → 全市场一次取
+        out = normalize_industry(df)
+        if codes is not None:
+            out = out[out["code"].isin(list(codes))].reset_index(drop=True)
+        return out

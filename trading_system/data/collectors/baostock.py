@@ -187,3 +187,13 @@ def query_balance(code: str, year: int, quarter: int):
 
     rs = bs.query_balance_data(code=code, year=int(year), quarter=int(quarter))
     return _collect_rs(rs, f"balance {code} {year}Q{quarter}")
+
+
+# ── 行业分类(批 4:低频近静态;query_stock_industry)──────────────────────────
+def query_industry(code: str = ""):
+    """申万行业分类(query_stock_industry):返回 updateDate, code, code_name, industry,
+    industryClassification。``code`` 为空 → 全市场一次取(省请求)。重型依赖惰性导入。"""
+    import baostock as bs
+
+    rs = bs.query_stock_industry(code=code)
+    return _collect_rs(rs, f"industry {code or 'ALL'}")

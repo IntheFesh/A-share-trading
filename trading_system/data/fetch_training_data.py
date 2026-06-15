@@ -35,6 +35,7 @@ from trading_system.data.collectors.quota import QuotaExceeded, RequestQuota
 from trading_system.data.collectors.tushare_collector import TushareCollector
 from trading_system.data.price_layers import attach_disclosure_fields, build_price_layers
 from trading_system.data.financial_store import FinancialStore
+from trading_system.data.industry_store import IndustryStore
 from trading_system.data.schema import DISCLOSURE_FIELDS
 from trading_system.data.store import ParquetStore
 from trading_system.data.universe import MAIN_BOARD_PREFIXES
@@ -221,6 +222,9 @@ def run_fetch(
     fin_out: "str | Path | None" = None,
     financial_store: "FinancialStore | None" = None,
     financials_start_year: int = 2019,
+    enable_industry: bool = False,
+    industry_out: "str | Path | None" = None,
+    industry_store: "IndustryStore | None" = None,
 ) -> int:
     """采集主流程(依赖可注入,便于离线测试)。返回进程退出码:0 成功 / 2 行情硬失败。
 
@@ -273,6 +277,7 @@ def run_fetch(
     quota_stopped = False                    # 配额达上限提前停止(优雅退出,数据/待拉已保住)
     fin_written = 0                           # 季频财务采集写入行数(批 2;--enable-financials 才启用)
     fin_failed: "list" = []                   # 财务采集失败的 (code, year, quarter)
+    ind_written = 0                           # 行业分类采集落盘总行数(批 4;--enable-industry 才启用)
 
     def _save_batch(panel_raw: pd.DataFrame) -> None:
         """即时落盘一批(默认主路径):双价格层 + 状态位 + 置空披露 → update_incremental。"""
@@ -354,6 +359,16 @@ def run_fetch(
                 logger.info("财务采集:写入 %d 行;失败 %d 个 (code,季)%s。",
                             fin_written, len(fin_failed),
                             "(配额提前停止)" if getattr(bc, "quota_stopped", False) else "")
+
+            # 行业分类采集(批 4:基础设施,仅采集落盘,默认关 → 不触碰)。一次请求取全市场,极省配额。
+            if enable_industry and codes and not quota_stopped:
+                ind_store = industry_store or IndustryStore(
+                    industry_out if industry_out is not None
+                    else Path(str(store.root).rstrip("/\\") + "_industry"))
+                logger.info("追加行业分类采集(一次取全市场);独立落盘 %s。", ind_store.root)
+                ind_panel = bc.fetch_industry(codes)
+                ind_written = ind_store.update(ind_panel)
+                logger.info("行业采集:本次 %d 只匹配到行业;落盘累计 %d 行。", len(ind_panel), ind_written)
     except QuotaExceeded:  # 交易池列举阶段即达配额阈值:未取任何行情,优雅退出
         quota_stopped = True
         _log_quota_stop(quota)
@@ -424,6 +439,8 @@ def run_fetch(
                 "已填充" if disclosure_status == "collected" else "NULL=未采集/未知")
     if enable_financials:
         logger.info("财务(季频,独立落盘):写入 %d 行;失败 %d 个 (code,季)。", fin_written, len(fin_failed))
+    if enable_industry:
+        logger.info("行业(独立落盘):落盘累计 %d 行。", ind_written)
     logger.info("当日 BaoStock 请求累计 %d / %d(安全余量 %d)。", quota.count, quota.limit, quota.margin)
     logger.info("落盘目录:%s", store.root)
     logger.info("下一步:python -m trading_system.run.phase1_factor_report"
@@ -463,6 +480,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="额外采集季频财务(profit/growth/balance,独立落盘 data_store_fin/;默认关)")
     p.add_argument("--fin-out", default=None,
                    help="财务独立落盘目录(默认 = 行情落盘目录同名加 _fin 后缀)")
+    p.add_argument("--enable-industry", action="store_true",
+                   help="额外采集申万行业分类(独立落盘 data_store_industry/;默认关)")
+    p.add_argument("--industry-out", default=None,
+                   help="行业独立落盘目录(默认 = 行情落盘目录同名加 _industry 后缀)")
     return p
 
 
@@ -478,6 +499,7 @@ def main(argv=None) -> int:
         daily_request_limit=args.daily_request_limit,
         daily_request_safety_margin=args.daily_request_safety_margin,
         enable_financials=args.enable_financials, fin_out=args.fin_out,
+        enable_industry=args.enable_industry, industry_out=args.industry_out,
     )
 
 

@@ -66,6 +66,10 @@ FINANCIAL_KEY_FIELDS: tuple[str, ...] = ("code", "statDate")
 # 财务数值列(落盘前转 float;日期列 statDate/pubDate 转 datetime)。
 FINANCIAL_NUMERIC_FIELDS: tuple[str, ...] = ("roeAvg", "netProfit", "YOYNI", "liabilityToAsset")
 
+# 行业分类字段(批 4;来自 BaoStock query_stock_industry,低频近静态,独立落盘,主键 code)。
+# industryClassification=分类标准(申万),industry=所属行业名。供行业中性化/板块共振识别用。
+INDUSTRY_FIELDS: tuple[str, ...] = ("code", "industry", "industryClassification")
+
 # 构造 build_price_layers 的最小输入列(不含 adj/状态/披露,这些由本系统派生)
 RAW_INPUT_FIELDS: tuple[str, ...] = (
     *KEY_FIELDS,

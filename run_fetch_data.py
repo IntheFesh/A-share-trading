@@ -55,6 +55,7 @@ def write_dataset_card(card: dict, output_dir) -> Path:
 
 
 def run(config: dict, *, end=None, full: bool = False, limit=None, enable_financials: bool = False,
+        enable_industry: bool = False,
         baostock_collector=None, tushare_collector_factory=None, universe_codes=None) -> int:
     # 本参数在 config.yaml 中修改,请勿在此硬改(改这里会导致脚本间参数不一致)
     paths, data = config["paths"], config["data"]
@@ -78,6 +79,8 @@ def run(config: dict, *, end=None, full: bool = False, limit=None, enable_financ
         # 季频财务采集(批 2;默认关,独立落盘到 data_dir 同名 _fin 目录或 config paths.data_dir_fin)
         enable_financials=enable_financials, fin_out=paths.get("data_dir_fin"),
         financials_start_year=start_year,
+        # 行业分类采集(批 4;默认关,独立落盘 data_dir 同名 _industry 目录或 config paths.data_dir_industry)
+        enable_industry=enable_industry, industry_out=paths.get("data_dir_industry"),
     )
     if rc == 0:
         card = build_dataset_card(store, start=data["start"], end=end, universe=config["universe"],
@@ -99,9 +102,11 @@ def main(argv=None) -> int:
                     help="只采集前 N 只票(按代码排序);默认 None=全部")
     ap.add_argument("--enable-financials", action="store_true",
                     help="额外采集季频财务(独立落盘 data_store_fin/;默认关)")
+    ap.add_argument("--enable-industry", action="store_true",
+                    help="额外采集申万行业分类(独立落盘 data_store_industry/;默认关)")
     a = ap.parse_args(argv)
     return run(load_config(), end=a.end, full=a.full, limit=a.limit,
-               enable_financials=a.enable_financials)
+               enable_financials=a.enable_financials, enable_industry=a.enable_industry)
 
 
 if __name__ == "__main__":
