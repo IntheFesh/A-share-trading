@@ -25,6 +25,15 @@ data:
   daily_request_safety_margin: 5000 # 配额安全余量;当日累计 >= limit-margin 即停止发起新请求、优雅退出
                                     # (已落盘数据 + 待拉列表保住,明日配额重置后增量重跑断点续传)
 
+# === 财务过滤层(批 3:避雷,剔除基本面恶化票;默认关,不破坏 baseline)===
+# 红线:可见性对齐只用 pubDate(实际公告日),绝不用 statDate(防未来函数)。
+# ⚠ 单位假设:默认把 YOYNI / liabilityToAsset 当作小数(0.85=85%、-0.50=-50%);
+#   若实际 BaoStock 返回百分数(85、-50),请把下面阈值改为 80 / -50。
+financial_filter:
+  enabled: false                    # 财务过滤总开关(默认关 = 池子与改动前一致)
+  max_liability_to_asset: 0.80      # 资产负债率上限(> 此值畸高 → 剔除)
+  yoyni_deteriorate: -0.50          # 净利润同比恶化阈值(当期亏损 且 同比 < 此值 → 剔除)
+
 # === 特征清单(顺序敏感:训练/预测/回测必须一致;与 features.registry 注册名严格对应)===
 features:
   - ret_1
