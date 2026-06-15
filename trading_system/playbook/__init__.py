@@ -23,6 +23,12 @@ PLAYBOOK_COLUMNS: tuple[str, ...] = (
     "limit_buy_price", "shares", "target_weight_pct",
     "stop_price", "tp1_price", "tp2_price", "tp3_price", "time_stop_date",
     "veto_reason",
+    # 仓位参考指标(系统计算的客观参考;仓位由用户结合风险承受与临场判断自定)
+    "atr_n",              # ATR(N)波动幅度;波动越大单笔应买越少
+    "single_cap_pct",     # 按 INV-5 的单股上限 w_max(主板 8%/特殊 5%),%
+    "kelly_suggest_pct",  # 按信号方向的凯利建议风险预算,%
+    "stop_distance_pct",  # (限价买入价-止损价)/限价买入价,即单笔最大亏损比例 %;可反推仓位
+    "amihud_illiq",       # Amihud 非流动性;极差流动性即便小资金也要警惕
     # 风险标注
     "days_to_disclosure", "has_preann", "pledge_high", "goodwill_high",
     "recent_regulatory_letter", "overextension_score", "hilo_regime",
@@ -54,8 +60,13 @@ def _footer_md(regime: dict) -> str:
         "\n---\n"
         f"- 情绪温度 T_t = {regime.get('T_t')},阶段 = {regime.get('stage')}\n"
         f"- 总仓位乘子 m_t = {regime.get('m_t')},总敞口 w_total = {regime.get('w_total')}\n"
+        f"- 当日 HiLo 高低切 = {regime.get('hilo_t')}\n"
         f"- 刹车档 s = {regime.get('brake_level')}\n"
         f"- 距下次 Tier 1 = {regime.get('days_to_tier1')} 日,Tier 2 = {regime.get('days_to_tier2')} 日\n"
+        "- 注:T_t/阶段/m_t/HiLo 等 regime 指标**仅作参考展示,不进入选股打分**"
+        "(接入打分需以 INV-4 交互形式并经验证,属未来工作)。\n"
+        "- 注:pledge_high/goodwill_high/recent_regulatory_letter 需额外数据源(质押/商誉/监管函),"
+        "当前未接入则为空,不臆造。\n"
     )
 
 

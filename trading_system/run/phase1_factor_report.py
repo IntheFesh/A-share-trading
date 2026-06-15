@@ -4,8 +4,10 @@
   (A) 计算验证(可在合成数据上跑):全特征**截断等变性必须全过**(防未来函数,硬门槛);
       并演示 RankIC/ICIR/分块 RankIC 的计算流程。合成数据是随机游走,RankIC≈0 属正常——
       这一步验证的是"算法正确",不是"因子有效"。
-  (B) 因子有效性(需真实数据,标 NOT RUN):2019 至今逐特征 RankIC/ICIR/分十层、分五阶段稳定性、
-      混池 vs 仅主板 A/B、收益三段拆解。需 BaoStock 实盘数据(+ 可选 token)。
+  (B) 因子有效性(真实数据单因子诊断):从 data_store 读真实数据,对 config.features 逐因子算
+      mean RankIC / ICIR / 分块RankIC(块长=持有期 H,避免标签重叠致 ICIR 虚高);data_store 为空则
+      优雅 NOT RUN。仅诊断单因子预测力,不代表组合可实现收益(见回测)。可设 train_end_for_report
+      规避在盲测段上看因子(防数据窥探)。
 
 退出码:0=截断等变性全过(计算验证通过);1=有特征泄漏(硬失败)。
 """
@@ -71,17 +73,66 @@ def main() -> int:
         "",
         "> 合成数据为随机游走,上表 RankIC≈0 属正常;本节只证明 RankIC/ICIR/分块IC 计算正确。",
         "",
-        "## (B) 因子有效性(需真实数据,**NOT RUN**)",
-        "",
-        "- 2019 至今逐特征 RankIC/ICIR/分十层、分五阶段稳定性 — 需 BaoStock 实盘数据。",
-        "- 混池 vs 仅主板 A/B、收益三段拆解(entry/overnight/exit) — 需真实数据。",
-        "> 真实因子有效性未验:请在装好 baostock 并拉取实盘后接入本节。",
     ]
+
+    # ── (B) 因子有效性:真实数据单因子诊断(data_store 为空则优雅 NOT RUN)──
+    from trading_system.config import load_config
+    from trading_system.data.store import ParquetStore
+
+    cfg = load_config()
+    fr = cfg.get("factor_report", {}) or {}
+    H = int(fr.get("label_horizon", 5))
+    train_end = fr.get("train_end_for_report")
+    feats = [f for f in cfg.get("features", []) if f in reg.REGISTRY]
+
+    lines += [
+        "## (B) 因子有效性(真实数据单因子诊断)", "",
+        "> 本节是**因子层面的单因子有效性诊断**(每个因子各自有无预测力),不代表组合策略的可实现收益;",
+        "> 真实可实现收益见回测(含 T+1 成交、成本、出场状态机)。", "",
+    ]
+    try:
+        data = ParquetStore(cfg["paths"]["data_dir"]).read()
+    except Exception as exc:  # noqa: BLE001 — 无数据/读取异常一律优雅回退
+        logger.warning("读取 data_store 失败,(B) 段回退 NOT RUN: %r", exc)
+        data = pd.DataFrame()
+
+    if data.empty:
+        lines += [
+            "- **NOT RUN**:data_store 为空(无真实数据)。请先用 `run_fetch_data.py` 拉取实盘行情后重跑;",
+            "  届时将对 config.features 逐因子输出真实 mean RankIC / ICIR / 分块 RankIC(H)。",
+        ]
+    else:
+        rp = data.sort_values(["code", "trade_date"]).reset_index(drop=True)
+        if train_end:
+            rp = rp[pd.to_datetime(rp["trade_date"]) <= pd.Timestamp(train_end)].reset_index(drop=True)
+        dmin = pd.to_datetime(rp["trade_date"]).min().date()
+        dmax = pd.to_datetime(rp["trade_date"]).max().date()
+        blind = cfg.get("splits", {}).get("blind_segment_start")
+        lines += [
+            f"- 本报告使用的数据区间:{dmin} ~ {dmax};{rp['code'].nunique()} 只票、{len(rp)} 行;"
+            f"标签持有期 H={H}。",
+            f"- train_end_for_report = {train_end!r}(null = 用全部数据)。",
+        ]
+        if train_end is None and blind and pd.Timestamp(dmax) >= pd.Timestamp(blind):
+            lines.append(
+                f"- ⚠ 数据窥探提醒:本报告数据已进入盲测段(自 {blind} 起)。反复查看盲测段内因子表现并据此"
+                "选因子,等于污染盲测段(变相过拟合);如需规避,把 train_end_for_report 设为盲测段起点之前。")
+        lines += ["", "| 因子 | mean RankIC | ICIR | 分块RankIC(H) |", "|---|---|---|---|"]
+        rp["__label__"] = build_y_h(rp, H)
+        for name in feats:
+            rp["__score__"] = reg.compute_feature(name, rp).reindex(rp.index)
+            sub = rp.dropna(subset=["__score__", "__label__"])
+            mic = metrics.mean_rank_ic(sub, "__score__", "__label__")
+            iic = metrics.icir(metrics.daily_rank_ic(sub, "__score__", "__label__"))
+            bic = metrics.blocked_rank_ic(sub, "__score__", "__label__", block_len=H).mean()
+            lines.append(f"| {name} | {mic:+.4f} | {iic:+.3f} | {bic:+.4f} |")
+
     out = REPORT_DIR / "phase1_factor_report.md"
     out.write_text("\n".join(lines), encoding="utf-8")
     logger.info("\n".join(lines))
     logger.info("\n报告已写入: %s", out)
-    logger.info("=== Phase 1 计算验证通过(截断等变性全过);因子有效性需真实数据(NOT RUN)===")
+    logger.info("=== Phase 1:截断等变性硬门槛通过(A);(B) 因子诊断见报告"
+                "(有真实数据则已计算,data_store 为空则 NOT RUN)===")
     return 0
 
 

@@ -20,6 +20,19 @@ data:
                                     # 防止某票请求挂起导致整个采集进程僵死。正常拉取约 8~15 秒/票
   batch_save_size: 200              # 每拉 N 只票落盘一次;中途中断不丢已落盘批次,且天然支持
                                     # 断点续传(重跑时增量模式自动跳过已落盘的票)
+  daily_request_limit: 50000        # BaoStock 免费账户单日请求次数上限(经验值,按账户调整);
+                                    # 跨进程按国内自然日(Asia/Shanghai)持久化计数,防反复重拉触发限流/封 IP
+  daily_request_safety_margin: 5000 # 配额安全余量;当日累计 >= limit-margin 即停止发起新请求、优雅退出
+                                    # (已落盘数据 + 待拉列表保住,明日配额重置后增量重跑断点续传)
+
+# === 财务过滤层(批 3:避雷,剔除基本面恶化票;默认关,不破坏 baseline)===
+# 红线:可见性对齐只用 pubDate(实际公告日),绝不用 statDate(防未来函数)。
+# ⚠ 单位假设:默认把 YOYNI / liabilityToAsset 当作小数(0.85=85%、-0.50=-50%);
+#   若实际 BaoStock 返回百分数(85、-50),请把下面阈值改为 80 / -50。
+financial_filter:
+  enabled: false                    # 财务过滤总开关(默认关 = 池子与改动前一致)
+  max_liability_to_asset: 0.80      # 资产负债率上限(> 此值畸高 → 剔除)
+  yoyni_deteriorate: -0.50          # 净利润同比恶化阈值(当期亏损 且 同比 < 此值 → 剔除)
 
 # === 特征清单(顺序敏感:训练/预测/回测必须一致;与 features.registry 注册名严格对应)===
 features:
@@ -55,17 +68,23 @@ risk:
   stop_loss_atr_mult: 2.5           # 硬止损 = 入场价 - 2.5N
   take_profit_ladder: [1.0, 2.0]    # 止盈阶梯 +1R / +2R
   trail_atr_mult: 2.5               # 跟踪止损系数 c
-  max_holding_days: 10              # 最大持有期 H 上界(= H_max)
+  max_holding_days: 25              # 一笔交易最长持有的交易日数 = H_max;用户实际短线打法上限 25 个交易日
+  total_exposure_cap: 0.5           # 总敞口硬顶(顶格五成,不加杠杆);position_mode=risk 时用
 
 # === 区间划分(回测三纪律的物理隔离)===
 splits:
-  embargo_days: 13                  # = H_max(10) + K(2) + 1,运行时断言
+  embargo_days: 28                  # = H_max(25) + K_limitdown(2) + 1;训练截止距盲测段须 ≥ 此值,防标签窗与盲测段重叠泄漏
   blind_segment_start: "2025-07-01" # 盲测段起点;调参时严禁触碰
 
 # === 冠军挑战者(影子运行式)===
 champion_challenger:
   shadow_period_days: 10            # 一个影子期 = 10 个交易日
   switch_requires_consecutive: 3    # 挑战者需连续 N 个影子期累计不输于冠军才换届(防单期噪声)
+  validation_method: "shadow"       # 验证方式:"shadow"=影子运行连胜(默认,行为不变);
+                                    # "cpcv"=组合净化交叉验证多路径分布裁决
+  cpcv_blocks: 8                    # CPCV 块数 S(偶数);路径数=C(S,S/2)
+  cpcv_pbo_max: 0.30                # 换届要求 PBO < 此值(不放松)
+  cpcv_dsr_min: 0.95                # 换届要求 DSR > 此值(不放松)
   # 挑战者 = run_train.py 用"截至当下全部数据(含最近 10 天)"训练的完整模型(用户真会用的版本,
   # 不阉割);先不上线实用,先并行影子空跑;用其影子期内的真实前瞻成绩与冠军比较。
 
@@ -73,3 +92,42 @@ champion_challenger:
 backtest:
   max_param_combos: 50              # 粗桶参数组合上限,超过报错(禁止精细网格)
   pbo_warn_threshold: 0.30          # PBO 超此值在报告中标红警告
+  top_n: 20                         # 回测每日买入预测排名前 N 名;N 小=贴近实操但高方差,
+                                    # N 大=衡量信号整体质量。用户实操可设 3,看信号质量设 20
+  position_weights: "equal"         # 前 N 名的权重分配:"equal"=等权;或给列表如 [0.5,0.3,0.2]
+                                    # 表示第1/2/3名权重(列表长度需=top_n;和不必为1,按总敞口归一)
+  position_mode: "equal"            # 回测仓位模式:"equal"=等权(默认);"risk"=portfolio风控(批4实装)
+
+# === 训练侧(新功能默认关闭/维持原行为)===
+training:
+  route: "C"                        # 默认标签路线;A=秩回归 B=净收益回归 C=lambdarank分位
+  compare_routes: false             # 是否训练全部 A/B/C 并输出 RankIC 对比;默认关
+  time_decay:
+    enabled: false                  # 时间衰减样本权重总开关;默认关,确保不开时行为不变
+    half_life_candidates: [250, 500, 750]   # 候选半衰期(交易日,≈1/2/3年);
+                                    # baseline 后用样本外 RankIC 对比择稳健者,选定后冻结
+    half_life_active: 500           # 当前启用的半衰期;先验默认2年,选定后改这里冻结
+                                    # 依据:A股风格周期约1.5-3年;w=0.5^((t_end-t_i)/H)
+  cache:
+    enabled: true                   # 特征/标签缓存开关;默认开,加速重训(批2实装)
+    cache_dir: "./train_cache"      # 缓存落盘目录(已加入 .gitignore)
+  tune:
+    enabled: false                  # Optuna 超参搜索开关;默认关。baseline 后再人工开启
+    n_trials: 30                    # 试验次数(粗调,不要精细网格);受 max_param_combos 精神约束
+  label:
+    type: "fixed_h"                 # 标签类型:"fixed_h"=固定窗(现状,快);
+                                    # "engine"=引擎版动态出场净收益(对齐实际交易,慢,需缓存)
+    fixed_horizon: 5                # type=fixed_h 时的持有窗(交易日)
+                                    # type=engine 时用 risk.max_holding_days(25)等出场参数
+
+# === 因子体检报告(phase1_factor_report 的 (B) 真实数据段)===
+factor_report:
+  label_horizon: 5                  # 因子体检用的标签持有期(交易日);算未来 N 天收益做 RankIC
+  train_end_for_report: null        # 因子体检的数据截止日;null=用全部数据。注意:若要避免在盲测段上
+                                    # 看因子(防数据窥探),可设为盲测段起点之前的日期
+
+# === 数据质量(ATR 稳健化等使用环节处理;不删除原始数据)===
+data_quality:
+  robust_atr: true                  # 作战手册 ATR 稳健化:对真实波幅 TR 做序列分位截断,
+                                    # 抑制后复权边界等单点异常把止盈止损跨度带歪(数据不删,仅使用环节稳健化)
+  atr_winsorize_quantile: 0.99      # TR 截断上限分位(> 此分位的 TR 截到此处);1.0=不截断

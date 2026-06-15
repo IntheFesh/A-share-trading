@@ -16,16 +16,16 @@ from trading_system.model import approval, cv, train, tune
 # ── purged / embargo CV ─────────────────────────────────────────────────────
 class TestPurgedCV:
     def test_embargo_formula(self):
-        assert cv.embargo_from_config(10, 2) == 13
+        assert cv.embargo_from_config(25, 2) == 28   # H_max(25)+K(2)+1;持有期统一为 25 交易日
 
     def test_walk_forward_has_embargo_gap_and_no_overlap(self):
-        dates = list(range(100))
-        splits = cv.purged_walk_forward_splits(dates, n_splits=4, embargo=13)
+        dates = list(range(200))                     # 区间放长以容纳 embargo=28
+        splits = cv.purged_walk_forward_splits(dates, n_splits=4, embargo=28)
         assert len(splits) == 4
         for train_d, val_d in splits:
             assert set(train_d).isdisjoint(set(val_d))          # 无重叠
             assert max(train_d) < min(val_d)                     # 训练在验证之前
-            assert min(val_d) - max(train_d) - 1 == 13           # 间隔恰为 embargo
+            assert min(val_d) - max(train_d) - 1 == 28           # 间隔恰为 embargo
 
     def test_row_masks(self):
         rd = np.array([1, 2, 3, 4, 5])

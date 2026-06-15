@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -24,7 +25,11 @@ from trading_system.data import price_layers as pl
 from trading_system.data.collectors import synthetic
 from trading_system.model import model_io
 from trading_system.model.cv import assert_train_end_safe
-from trading_system.model.train import train_and_save
+from trading_system.model.train import (
+    compare_label_routes,
+    compute_time_decay_weights,
+    train_and_save,
+)
 
 
 # ── 公共构造 ────────────────────────────────────────────────────────────────
@@ -40,6 +45,7 @@ def _config(tmp_path, **overrides):
                     "output_dir": str(tmp_path / "out")}
     cfg["features"] = ["ret_1", "ret_5", "ret_20"]            # 加速:小特征集
     cfg["splits"]["blind_segment_start"] = "2030-01-01"       # 远期,默认不触碰
+    cfg.setdefault("training", {}).setdefault("cache", {})["cache_dir"] = str(tmp_path / "tcache")
     cfg.update(overrides)
     return cfg
 
@@ -87,10 +93,10 @@ class TestModelCard:
 class TestEmbargo:
     def test_train_end_too_close_raises(self):
         with pytest.raises(ValueError):
-            assert_train_end_safe("2025-06-25", "2025-07-01", 13)   # 间隔不足 13 个交易日
+            assert_train_end_safe("2025-06-25", "2025-07-01", 28)   # 间隔不足 28 个交易日
 
     def test_train_end_safe_passes(self):
-        assert assert_train_end_safe("2025-05-01", "2025-07-01", 13) >= 13
+        assert assert_train_end_safe("2025-03-01", "2025-07-01", 28) >= 28
 
     def test_train_and_save_blocks_peeking(self, tmp_path):
         ds, _ = _dataset()
@@ -217,11 +223,135 @@ class TestPredictEndToEnd:
         model_path = train_and_save(ds, train_end="2020-02-20", config=cfg,
                                     model_dir=cfg["paths"]["model_dir"])
         asof = str(cal.dates[35])  # 训练区间之后的某交易日(仍在数据内)
+        # 1E-4:外部风险数据接口——提供则填,不提供则空
+        rf = {ds["code"].iloc[0]: {"pledge_high": True, "goodwill_high": False,
+                                   "recent_regulatory_letter": None}}
         table, info = run_prediction(ds, asof_date=asof, config=cfg, model_path=str(model_path),
                                      output_dir=cfg["paths"]["output_dir"], top_k=5,
-                                     print_console=False)
+                                     print_console=False, risk_flags=rf)
         assert info["model_train_end"] == "2020-02-20"
         assert len(table) > 0 and "limit_buy_price" in table.columns and "stop_price" in table.columns
+        # 仓位参考指标已计算并填充(批1B)
+        for col in ("atr_n", "single_cap_pct", "kelly_suggest_pct", "stop_distance_pct", "amihud_illiq"):
+            assert col in table.columns
+        assert table["atr_n"].notna().any() and table["stop_distance_pct"].notna().any()
+        # 1E-1:SHAP 前三理由非空且为合理特征名组合
+        assert table["shap_top3"].notna().any()
+        a_shap = table["shap_top3"].dropna().iloc[0]
+        assert any(f in a_shap for f in cfg["features"]) and ("↑" in a_shap or "↓" in a_shap)
+        # 1E-2:regime 仅展示(页脚有真实 T_t/m_t,不再是 None);未污染模型特征
+        md = (Path(cfg["paths"]["output_dir"]) / f"playbook_{asof}.md").read_text(encoding="utf-8")
+        assert "T_t = None" not in md and "仅作参考展示,不进入选股打分" in md
+        # 1E-4:risk_flags 提供的票被填充;未提供的为空(不臆造)
+        import pandas as pd
+        first = table[table["code"] == ds["code"].iloc[0]]
+        if len(first):
+            assert bool(first["pledge_high"].iloc[0]) is True
+
+    def test_disclosure_off_predict_runs(self, tmp_path):
+        # 1E-3:enable_disclosure=false(默认)时预测全流程正常、披露列为空、不报错
+        from trading_system.predict import run_prediction
+        ds, cal = _dataset(n_days=40, n_codes=12, seed=8)
+        cfg = _config(tmp_path)
+        assert cfg["data"]["enable_disclosure"] is False
+        mp = train_and_save(ds, train_end="2020-02-20", config=cfg, model_dir=cfg["paths"]["model_dir"])
+        table, _ = run_prediction(ds, asof_date=str(cal.dates[35]), config=cfg, model_path=str(mp),
+                                  output_dir=cfg["paths"]["output_dir"], top_k=5, print_console=False)
+        assert len(table) > 0   # 披露关闭不影响预测;days_to_disclosure 列存在(值可空)
+        assert "days_to_disclosure" in table.columns
+
+
+# ── 批5:CPCV 多路径换届(与影子并存;不弱化 INV-6 / 不放松门槛)────────────────
+class TestCPCV:
+    def test_build_and_evaluate(self):
+        from trading_system.model.cpcv import build_block_perf, cpcv_evaluate
+        day = pd.date_range("2020-01-06", periods=40, freq="D")
+        rows = []
+        rng = np.random.default_rng(0)
+        for d in day:
+            x = rng.normal(size=20)
+            rows.append(pd.DataFrame({"trade_date": d, "code": range(20), "s1": x, "s2": -x,
+                                      "__fwd__": x + 0.05 * rng.normal(size=20)}))
+        panel = pd.concat(rows, ignore_index=True)
+        M = build_block_perf(panel, ["s1", "s2"], "__fwd__", n_blocks=8)
+        assert M.shape == (8, 2)
+        ev = cpcv_evaluate(M)
+        assert 0.0 <= ev["pbo"] <= 1.0 and "dsr_best" in ev
+
+    def test_signal_challenger_switches(self):
+        from trading_system.model.cpcv import cpcv_switch_decision
+        rng = np.random.default_rng(0)
+        M = rng.normal(0.0, 0.005, (8, 4))
+        M[:, 0] += 0.03   # 挑战者:每块稳定强(信号)
+        M[:, 1] += 0.008  # 冠军:中等
+        dec = cpcv_switch_decision(M, pbo_max=0.30, dsr_min=0.95)
+        assert dec["pbo"] < 0.30 and dec["dsr_challenger"] > 0.95 and dec["switch"] is True
+
+    def test_noise_challenger_no_switch(self):
+        from trading_system.model.cpcv import cpcv_switch_decision
+        rng = np.random.default_rng(1)
+        M = rng.normal(0.0, 0.01, (8, 4))   # 全噪声/过拟合
+        dec = cpcv_switch_decision(M, pbo_max=0.30, dsr_min=0.95)
+        assert dec["switch"] is False        # PBO 高(≈0.5)-> 不予换届
+
+    def test_run_cpcv_and_shadow_paths(self, tmp_path):
+        import run_champion_challenger as cc
+        from trading_system.champion_challenger import ShadowPeriodResult
+        cfg = _config(tmp_path)
+        # shadow(默认)路径不变:连续 3 期不输才换
+        cfg["champion_challenger"]["validation_method"] = "shadow"
+        wins = [ShadowPeriodResult(i, 0.05, -0.02, 0.04, -0.02) for i in range(3)]
+        assert cc.run(cfg, period_results=wins)["switch"] is True
+        # cpcv 路径:信号挑战者换届;无 block_perf 报错
+        cfg["champion_challenger"]["validation_method"] = "cpcv"
+        M = np.random.default_rng(0).normal(0, 0.005, (8, 4)); M[:, 0] += 0.03; M[:, 1] += 0.008
+        assert cc.run(cfg, block_perf=M)["switch"] is True
+        with pytest.raises(ValueError):
+            cc.run(cfg)
+
+
+# ── 批3:时间衰减 / 引擎标签 / A·B·C 对比 / Optuna ──────────────────────────
+class TestTrainingUpgrades:
+    def test_time_decay_weights_monotonic(self):
+        import pandas as pd
+        dates = list(pd.bdate_range("2020-01-06", periods=40))
+        w = compute_time_decay_weights(dates, dates[-1], half_life=10)
+        assert abs(w[-1] - 1.0) < 1e-12          # train_end 当日权重=1
+        assert w[0] < w[-1]                        # 老样本权重 < 新样本
+        assert np.all(np.diff(w) >= -1e-12)        # 随时间非递减
+
+    def test_train_with_time_decay_enabled(self, tmp_path):
+        from trading_system.model.model_io import load_model
+        ds, _ = _dataset(n_days=60, n_codes=10, seed=1)
+        cfg = _config(tmp_path)
+        cfg["training"]["time_decay"] = {"enabled": True, "half_life_active": 30}
+        card = load_model(train_and_save(ds, train_end="2020-03-10", config=cfg,
+                                         model_dir=cfg["paths"]["model_dir"]))
+        assert card.params["time_decay"] is not None and card.params["time_decay"]["half_life"] == 30
+
+    def test_engine_label_records_type(self, tmp_path):
+        from trading_system.model.model_io import load_model
+        ds, _ = _dataset(n_days=50, n_codes=6, seed=2)
+        cfg = _config(tmp_path)
+        cfg["training"]["label"] = {"type": "engine", "fixed_horizon": 5}
+        card = load_model(train_and_save(ds, train_end="2020-03-01", config=cfg,
+                                         model_dir=cfg["paths"]["model_dir"]))
+        assert card.params["label_type"] == "engine"
+
+    def test_compare_routes_three_rows(self, tmp_path):
+        ds, _ = _dataset(n_days=90, n_codes=12, seed=3)
+        cfg = _config(tmp_path)
+        table = compare_label_routes(ds, cfg, train_end="2020-04-30", n_splits=2)
+        assert set(table["route"]) == {"A", "B", "C"} and len(table) == 3
+
+    def test_tune_enabled_records_params(self, tmp_path):
+        from trading_system.model.model_io import load_model
+        ds, _ = _dataset(n_days=90, n_codes=10, seed=4)
+        cfg = _config(tmp_path)
+        cfg["training"]["tune"] = {"enabled": True, "n_trials": 3}
+        card = load_model(train_and_save(ds, train_end="2020-04-30", config=cfg,
+                                         model_dir=cfg["paths"]["model_dir"]))
+        assert card.params["tuned_params"] is not None   # 调参参数已记录(粗调,purged CV)
 
 
 # ── 脚本可导入 + 读 config(单一源贯通)──────────────────────────────────────

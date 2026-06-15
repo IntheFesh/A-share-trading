@@ -4,8 +4,9 @@
 导入本模块即触发注册(见 features.builtin.__init__)。每个特征的时序原值由 registry
 计算,再由 registry.cross_sectional_rank 做每日截面 winsorize + 秩变换。
 
-注:CGO / 换手率族需流通股本(本仓 Phase 0 schema 未含),故此处未实现,留待数据补齐后接入
-(不臆造,不用代理冒充)。当前覆盖:量价基础 / 趋势 / 反转彩票 / 过度拉升 / 流动性。
+覆盖:量价基础 / 趋势 / 反转彩票 / 过度拉升 / 流动性 / 换手率族 / CGO 族。
+换手率族与 CGO 族用 BaoStock 提供的 ``turn``(换手率)实现——CGO 用换手率衰减加权的参考成本价
+(Grinblatt–Han),不臆造、不用代理冒充流通股本(无 turn 来源时为 NaN)。
 """
 
 from __future__ import annotations
@@ -109,27 +110,27 @@ def _cgo(g: pd.DataFrame, window: int) -> pd.Series:
     """CGO = (P_t - RP_t)/P_t,RP_t 为换手率衰减加权的参考成本价(只用过去,point-in-time)。
 
     RP_t = Σ_{k=1..n} w_{t,k}·P_{t-k},w_{t,k} = V_{t-k}·Π_{j=1..k-1}(1-V_{t-j}),归一化;
-    V 为换手率(turn/100,截断到 [0,1])。换手缺失则该行为 NaN。服务疑问②"切高位浮盈股"。
+    V 为换手率(turn/100,截断到 [0,1])。窗口内任一缺失则该行为 NaN。服务疑问②"切高位浮盈股"。
+    半向量化实现:外层逐日(保持 point-in-time 与截断等变性),内层用 numpy 一次算完窗口权重。
     """
     p = g["close_adj"].to_numpy(dtype="float64")
     v = np.clip(g["turn"].to_numpy(dtype="float64") / 100.0, 0.0, 1.0)
     n = len(g)
     rp = np.full(n, np.nan)
     for t in range(n):
-        lo = max(0, t - window)
-        num = wsum = 0.0
-        remain = 1.0
-        ok = True
-        for k in range(1, t - lo + 1):
-            vk = v[t - k]
-            if np.isnan(vk) or np.isnan(p[t - k]):
-                ok = False
-                break
-            w = vk * remain
-            num += w * p[t - k]
-            wsum += w
-            remain *= (1.0 - vk)
-        rp[t] = (num / wsum) if (ok and wsum > 0) else np.nan
+        m = min(t, window)            # 窗口内可用的滞后阶数 k=1..m
+        if m == 0:
+            continue
+        idx = np.arange(t - 1, t - 1 - m, -1)   # 滞后 P_{t-1}..P_{t-m}、V_{t-1}..V_{t-m}
+        big_p, big_v = p[idx], v[idx]
+        if np.isnan(big_v).any() or np.isnan(big_p).any():
+            continue                  # 与旧实现一致:窗口内任一 NaN -> rp NaN
+        # remaining[k-1] = Π_{j=1..k-1}(1-V_{t-j});w[k-1] = V_{t-k}·remaining[k-1]
+        remaining = np.concatenate(([1.0], np.cumprod(1.0 - big_v)[:-1]))
+        w = big_v * remaining
+        wsum = w.sum()
+        if wsum > 0:
+            rp[t] = float((w * big_p).sum() / wsum)
     return pd.Series((p - rp) / p, index=g.index)
 
 

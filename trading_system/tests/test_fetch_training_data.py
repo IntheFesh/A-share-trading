@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -17,9 +18,13 @@ import pytest
 from trading_system.data import fetch_training_data as ftd
 from trading_system.data.collectors import baostock_collector as bcoll
 from trading_system.data.collectors.baostock_collector import BaostockCollector
+from trading_system.data.collectors.quota import RequestQuota
 from trading_system.data.price_layers import attach_disclosure_fields, build_price_layers
 from trading_system.data.schema import RAW_INPUT_FIELDS
 from trading_system.data.store import ParquetStore
+from trading_system.data.universe import MAIN_BOARD_PREFIXES
+
+_FIXED_UTC = lambda: datetime(2026, 6, 15, 6, 0, tzinfo=timezone.utc)  # 固定同一国内自然日
 
 
 # ── 测试构造 ────────────────────────────────────────────────────────────────
@@ -57,7 +62,7 @@ class FakeBC:
     def __exit__(self, *a):
         return False
 
-    def list_universe(self, day, *, boards=("60", "000")):
+    def list_universe(self, day, *, boards=MAIN_BOARD_PREFIXES):
         return self.universe
 
     def fetch_many(self, codes, start_by_code, end):
@@ -204,31 +209,49 @@ class ScriptedBC:
     k 很大(如 99)测"重拉仍失败→最终失败报告,不无限重试"。
     """
 
-    def __init__(self, panels_by_code, *, fail_counts=None, login_raises=False):
+    def __init__(self, panels_by_code, *, fail_counts=None, login_raises=False,
+                 quota=None, cost=2):
         self.panels = panels_by_code
         self.login_raises = login_raises
         self._remaining = dict(fail_counts or {})
         self.calls: list[list[str]] = []          # 每次 fetch_many 的入参 codes(顺序)
         self.received_start = None                 # 最近一次 fetch_many 的 start_by_code
         self.universe = list(panels_by_code)
+        self.quota = quota                          # 可选:模拟真实采集器把请求计入配额
+        self.cost = cost                            # 每只票一次拉取消耗的请求数(默认 2)
+        self.quota_stopped = False
+        self.remaining_codes: list[str] = []
 
     def __enter__(self):
         if self.login_raises:
             raise RuntimeError("baostock login failed (mock)")
+        if self.quota is not None:
+            self.quota.add(1)                       # 登录计入配额
         return self
 
     def __exit__(self, *a):
+        if self.quota is not None:
+            self.quota.add(1)                       # 登出计入配额
+            self.quota.flush()
         return False
 
-    def list_universe(self, day, *, boards=("60", "000")):
+    def list_universe(self, day, *, boards=MAIN_BOARD_PREFIXES):
         return list(self.universe)
 
     def fetch_many(self, codes, start_by_code, end):
         self.received_start = (dict(start_by_code) if isinstance(start_by_code, dict)
                                else start_by_code)
         self.calls.append(list(codes))
+        self.quota_stopped = False
+        self.remaining_codes = []
         frames, failed = [], []
-        for c in codes:
+        for i, c in enumerate(codes):
+            if self.quota is not None and self.quota.exceeded():   # 配额耗尽:停止本批,余下待拉
+                self.quota_stopped = True
+                self.remaining_codes = list(codes[i:])
+                break
+            if self.quota is not None:
+                self.quota.add(self.cost)           # 本次拉取计入配额
             if self._remaining.get(c, 0) > 0:      # 本轮仍判失败(模拟超时跳过)
                 self._remaining[c] -= 1
                 failed.append(c)
@@ -359,3 +382,40 @@ def test_batched_equals_single_save(tmp_path):
     a = single.read(codes=codes).sort_values(["code", "trade_date"]).reset_index(drop=True)
     b = batched.read(codes=codes).sort_values(["code", "trade_date"]).reset_index(drop=True)
     pd.testing.assert_frame_equal(a, b)                    # 分批与一次性逐格相等
+
+
+# ── 13) 配额保护:当日累计达 limit-margin → 优雅停止,已拉部分落盘,余下记待拉,退出 0 ──
+def test_run_fetch_quota_stop_graceful(tmp_path):
+    codes = [f"sh.60000{i}" for i in range(5)]
+    panels = {c: _raw(c, _DATES) for c in codes}
+    store = ParquetStore(tmp_path / "store")
+    out = tmp_path / "out"
+    # limit=8, margin=2 → 阈值 6。login(+1) 后:code0→3、code1→5、code2→7;查 code3 时已 >=6 → 停。
+    q = RequestQuota(store.root / ".baostock_quota.json", daily_limit=8, safety_margin=2,
+                     now_fn=_FIXED_UTC)
+    bc = ScriptedBC(panels, quota=q, cost=2)
+    rc = ftd.run_fetch(universe_codes=codes, baostock_collector=bc, store=store, quota=q,
+                       enable_disclosure=False, incremental=True,
+                       batch_save_size=10, output_dir=out)
+    assert rc == 0                                          # 优雅退出(非硬失败)
+    saved = set(store.read(codes=codes)["code"])
+    assert 0 < len(saved) < len(codes)                     # 已拉部分落盘(不丢),未拉部分未落盘
+    pend = json.loads((out / "pending_codes.json").read_text(encoding="utf-8"))
+    assert set(pend["codes"]) == set(codes) - saved        # 余下的票记入待拉(明日续传)
+    assert not (out / "failed_codes.json").exists()        # 配额停止 ≠ 永久失败,不写失败报告
+    assert q.exceeded()                                    # 配额确已达阈值
+
+
+# ── 14) 配额已满启动:开跑前即超阈值 → 不登录、不取数,优雅退出 0 ─────────────────
+def test_run_fetch_quota_already_exhausted_at_start(tmp_path):
+    codes = ["sh.600000"]
+    store = ParquetStore(tmp_path / "store")
+    q = RequestQuota(store.root / ".baostock_quota.json", daily_limit=10, safety_margin=2,
+                     now_fn=_FIXED_UTC)
+    q.add(9)                                               # 9 >= 阈值 8 → 已超
+    bc = ScriptedBC({c: _raw(c, _DATES) for c in codes}, quota=q)
+    rc = ftd.run_fetch(universe_codes=codes, baostock_collector=bc, store=store, quota=q,
+                       enable_disclosure=False, output_dir=tmp_path / "out")
+    assert rc == 0
+    assert bc.calls == []                                  # 没有发起任何拉取(也没登录消耗)
+    assert store.read(codes=codes).empty                   # 未写入任何数据
