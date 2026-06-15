@@ -4,8 +4,9 @@
 导入本模块即触发注册(见 features.builtin.__init__)。每个特征的时序原值由 registry
 计算,再由 registry.cross_sectional_rank 做每日截面 winsorize + 秩变换。
 
-注:CGO / 换手率族需流通股本(本仓 Phase 0 schema 未含),故此处未实现,留待数据补齐后接入
-(不臆造,不用代理冒充)。当前覆盖:量价基础 / 趋势 / 反转彩票 / 过度拉升 / 流动性。
+覆盖:量价基础 / 趋势 / 反转彩票 / 过度拉升 / 流动性 / 换手率族 / CGO 族。
+换手率族与 CGO 族用 BaoStock 提供的 ``turn``(换手率)实现——CGO 用换手率衰减加权的参考成本价
+(Grinblatt–Han),不臆造、不用代理冒充流通股本(无 turn 来源时为 NaN)。
 """
 
 from __future__ import annotations
