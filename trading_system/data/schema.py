@@ -47,6 +47,25 @@ DISCLOSURE_FIELDS: tuple[str, ...] = (
     "days_to_disclosure",
 )
 
+# 季频财务字段(来自 BaoStock 免费财务接口,独立频率/独立落盘,不混进日频 RAW_INPUT_FIELDS)。
+# PIT 关键:必须保留 pubDate(实际公告日)——可见性对齐只能用 pubDate,绝不能用 statDate(报告期),
+# 否则会在报告期当日就"看到"尚未公告的财报,构成未来函数泄漏。字段名以 BaoStock 实际返回为准:
+#   roeAvg=净资产收益率(query_profit_data)、netProfit=净利润(query_profit_data)、
+#   YOYNI=净利润同比(query_growth_data)、liabilityToAsset=资产负债率(query_balance_data)。
+FINANCIAL_FIELDS: tuple[str, ...] = (
+    "code",
+    "statDate",
+    "pubDate",
+    "roeAvg",
+    "netProfit",
+    "YOYNI",
+    "liabilityToAsset",
+)
+# 财务面板主键(季频,与日频行情的 (code, trade_date) 不同)。
+FINANCIAL_KEY_FIELDS: tuple[str, ...] = ("code", "statDate")
+# 财务数值列(落盘前转 float;日期列 statDate/pubDate 转 datetime)。
+FINANCIAL_NUMERIC_FIELDS: tuple[str, ...] = ("roeAvg", "netProfit", "YOYNI", "liabilityToAsset")
+
 # 构造 build_price_layers 的最小输入列(不含 adj/状态/披露,这些由本系统派生)
 RAW_INPUT_FIELDS: tuple[str, ...] = (
     *KEY_FIELDS,

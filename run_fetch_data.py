@@ -54,11 +54,15 @@ def write_dataset_card(card: dict, output_dir) -> Path:
     return p
 
 
-def run(config: dict, *, end=None, full: bool = False, limit=None,
+def run(config: dict, *, end=None, full: bool = False, limit=None, enable_financials: bool = False,
         baostock_collector=None, tushare_collector_factory=None, universe_codes=None) -> int:
     # 本参数在 config.yaml 中修改,请勿在此硬改(改这里会导致脚本间参数不一致)
     paths, data = config["paths"], config["data"]
     store = ParquetStore(paths["data_dir"])
+    try:
+        start_year = int(str(data["start"])[:4])
+    except (ValueError, TypeError, KeyError):
+        start_year = 2019
     rc = run_fetch(
         start=data["start"], end=end, universe=config["universe"],
         enable_disclosure=data["enable_disclosure"], incremental=not full, store=store,
@@ -71,6 +75,9 @@ def run(config: dict, *, end=None, full: bool = False, limit=None,
         output_dir=paths["output_dir"],
         daily_request_limit=data.get("daily_request_limit", 50000),
         daily_request_safety_margin=data.get("daily_request_safety_margin", 5000),
+        # 季频财务采集(批 2;默认关,独立落盘到 data_dir 同名 _fin 目录或 config paths.data_dir_fin)
+        enable_financials=enable_financials, fin_out=paths.get("data_dir_fin"),
+        financials_start_year=start_year,
     )
     if rc == 0:
         card = build_dataset_card(store, start=data["start"], end=end, universe=config["universe"],
@@ -90,8 +97,11 @@ def main(argv=None) -> int:
     ap.add_argument("--full", action="store_true", help="全量重拉(默认增量)")
     ap.add_argument("--limit", type=int, default=None,
                     help="只采集前 N 只票(按代码排序);默认 None=全部")
+    ap.add_argument("--enable-financials", action="store_true",
+                    help="额外采集季频财务(独立落盘 data_store_fin/;默认关)")
     a = ap.parse_args(argv)
-    return run(load_config(), end=a.end, full=a.full, limit=a.limit)
+    return run(load_config(), end=a.end, full=a.full, limit=a.limit,
+               enable_financials=a.enable_financials)
 
 
 if __name__ == "__main__":

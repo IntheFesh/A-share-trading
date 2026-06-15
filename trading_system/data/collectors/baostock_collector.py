@@ -16,11 +16,16 @@ import logging
 import threading
 import time
 
+import numpy as np
 import pandas as pd
 
 from trading_system.data.collectors import baostock as bs_api
 from trading_system.data.collectors.quota import QuotaExceeded, RequestQuota
-from trading_system.data.schema import RAW_INPUT_FIELDS
+from trading_system.data.schema import (
+    FINANCIAL_FIELDS,
+    FINANCIAL_NUMERIC_FIELDS,
+    RAW_INPUT_FIELDS,
+)
 from trading_system.data.universe import MAIN_BOARD_PREFIXES, board_allowed
 
 logger = logging.getLogger(__name__)
@@ -78,6 +83,54 @@ def _default_all_stock(day: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=rs.fields)
 
 
+def _pick(df: "pd.DataFrame | None", cols: "list[str]") -> "pd.DataFrame | None":
+    """从单期财务表抽取 (code, statDate, pubDate, *cols);空/None 返回 None。缺列容忍(以实际返回为准)。"""
+    if df is None or len(df) == 0:
+        return None
+    keep = [c for c in ("code", "statDate", "pubDate", *cols) if c in df.columns]
+    return df[keep].copy()
+
+
+def merge_financial(profit, growth, balance) -> "pd.DataFrame | None":
+    """合并单个 (code,year,quarter) 的 profit/growth/balance 三表为一行,产出 FINANCIAL_FIELDS。
+
+    - 按 (code, statDate) 外连接抽取 roeAvg/netProfit(profit)、YOYNI(growth)、liabilityToAsset(balance);
+    - pubDate 跨三表取同一报告期的公告日(coalesce;三表同报告应一致),**原样保留**(PIT 对齐用);
+    - statDate/pubDate 转 datetime、数值列转 float(原值不变,仅落盘 dtype 规整)。三表全空返回 None。
+    字段名以 BaoStock 实际返回为准:roeAvg/netProfit/YOYNI/liabilityToAsset。
+    """
+    p = _pick(profit, ["roeAvg", "netProfit"])
+    g = _pick(growth, ["YOYNI"])
+    b = _pick(balance, ["liabilityToAsset"])
+    present = [x for x in (p, g, b) if x is not None]
+    if not present:
+        return None
+
+    # pubDate:汇集三表的 (code, statDate, pubDate),按报告期去重取首个非空(同报告期公告日一致)
+    pubs = [x[["code", "statDate", "pubDate"]] for x in present if "pubDate" in x.columns]
+    metric_only = [x.drop(columns=[c for c in ("pubDate",) if c in x.columns]) for x in present]
+    out = metric_only[0]
+    for nxt in metric_only[1:]:
+        out = out.merge(nxt, on=["code", "statDate"], how="outer")
+    if pubs:
+        pub = pd.concat(pubs, ignore_index=True).dropna(subset=["pubDate"])
+        pub = pub[pub["pubDate"].astype(str).str.len() > 0]
+        pub = pub.drop_duplicates(subset=["code", "statDate"], keep="first")
+        out = out.merge(pub, on=["code", "statDate"], how="left")
+    if "pubDate" not in out.columns:
+        out["pubDate"] = pd.NaT
+
+    for c in FINANCIAL_NUMERIC_FIELDS:                 # 缺失列补 NaN,保证 schema 齐全
+        if c not in out.columns:
+            out[c] = np.nan
+    out = out.reindex(columns=list(FINANCIAL_FIELDS))
+    out["statDate"] = pd.to_datetime(out["statDate"], errors="coerce")
+    out["pubDate"] = pd.to_datetime(out["pubDate"], errors="coerce")
+    for c in FINANCIAL_NUMERIC_FIELDS:                 # 统一 float64,避免跨票 int/float dtype 漂移
+        out[c] = pd.to_numeric(out[c], errors="coerce").astype("float64")
+    return out
+
+
 class BaostockCollector:
     """BaoStock 行情采集编排。"""
 
@@ -88,6 +141,9 @@ class BaostockCollector:
         logout_fn=bs_api.logout,
         fetch_fn=bs_api.fetch_raw_with_factor,
         all_stock_fn=_default_all_stock,
+        profit_fn=bs_api.query_profit,
+        growth_fn=bs_api.query_growth,
+        balance_fn=bs_api.query_balance,
         max_retries: int = 2,
         sleep_sec: float = 0.3,
         request_timeout_sec: float = DEFAULT_REQUEST_TIMEOUT_SEC,
@@ -98,6 +154,10 @@ class BaostockCollector:
         self.logout_fn = logout_fn
         self.fetch_fn = fetch_fn
         self.all_stock_fn = all_stock_fn
+        # 季频财务接口(批 2):profit/growth/balance 三表,均可注入便于离线 mock。
+        self.profit_fn = profit_fn
+        self.growth_fn = growth_fn
+        self.balance_fn = balance_fn
         self.max_retries = max_retries
         self.sleep_sec = sleep_sec
         # 单票请求超时(秒);<=0 关闭看门狗(直接同步调用)。超时→视为该次失败→重试/跳过。
@@ -144,32 +204,37 @@ class BaostockCollector:
                 codes.append(code)
         return codes
 
-    def fetch_code(self, code: str, start: str, end: str) -> "pd.DataFrame | None":
-        """拉单只票(不复权 + 后复权因子);单请求套超时看门狗 + 重试 ≤max_retries。
+    def _resilient_request(self, fn, args, *, cost: int):
+        """单个 BaoStock 请求的统一健壮封装:发起前查配额 → 超时看门狗 → 失败重试 → 计入配额。
 
-        无数据返回 None;超时/反复失败抛出(由 fetch_many 计入 failed,不阻塞整批)。
+        返回 fn 的结果;配额达阈值抛 QuotaExceeded(在 try 外查,未发起的请求不计数);
+        重试耗尽抛最后一次异常(含 TimeoutError)。每次"实际发起"的请求(成功/失败/超时)都计 cost
+        ——即便超时,请求很可能已达服务端,保守计数避免低估而触发服务端限流。
         """
         last_err = None
-        t0 = time.time()
         for attempt in range(self.max_retries + 1):
             if self.quota is not None:
                 self.quota.check()         # 发起请求前查配额:已满则抛 QuotaExceeded,绝不再发起
             try:
-                df = _call_with_timeout(
-                    self.fetch_fn, (code, start, end), self.request_timeout_sec
-                )
-                logger.info("baostock ok code=%s rows=%d %.2fs", code,
-                            0 if df is None else len(df), time.time() - t0)
-                return df if (df is not None and len(df) > 0) else None
+                return _call_with_timeout(fn, args, self.request_timeout_sec)
             except Exception as e:  # noqa: BLE001 — 含 TimeoutError:超时即视为该次失败
                 last_err = e
                 if attempt < self.max_retries:
                     time.sleep(self.sleep_sec)
             finally:
-                # 每一次实际发起的请求(成功/失败/超时)都计入:即便超时,请求很可能已达服务端,
-                # 保守计数避免低估而触发服务端限流。配额检查抛出时不进入 try,故不会误计。
-                self._quota_add(self.fetch_query_cost)
+                self._quota_add(cost)      # 配额检查抛出时不进入 try,故不会误计
         raise last_err  # type: ignore[misc]
+
+    def fetch_code(self, code: str, start: str, end: str) -> "pd.DataFrame | None":
+        """拉单只票(不复权 + 后复权因子);单请求套超时看门狗 + 重试 ≤max_retries。
+
+        无数据返回 None;超时/反复失败抛出(由 fetch_many 计入 failed,不阻塞整批)。
+        """
+        t0 = time.time()
+        df = self._resilient_request(self.fetch_fn, (code, start, end), cost=self.fetch_query_cost)
+        logger.info("baostock ok code=%s rows=%d %.2fs", code,
+                    0 if df is None else len(df), time.time() - t0)
+        return df if (df is not None and len(df) > 0) else None
 
     def _quota_stop(self, codes: "list[str]", i: int) -> None:
         """配额耗尽:记录本批从第 i 只起的剩余代码(供上层写待拉列表),并置停止位。"""
@@ -212,3 +277,49 @@ class BaostockCollector:
             if frames else pd.DataFrame(columns=list(RAW_INPUT_FIELDS))
         )
         return panel, failed
+
+    # ── 季频财务采集(批 2:避雷数据,仅采集落盘,不接入打分)──────────────────
+    def fetch_financials(
+        self, codes: "list[str]", years_quarters: "list[tuple[int, int]]"
+    ) -> "tuple[pd.DataFrame, list[tuple[str, int, int]]]":
+        """对每个 (code, year, quarter) 拉 profit/growth/balance 三表并合并为一行(含 pubDate)。
+
+        每次接口请求都套超时看门狗 + 重试 + 配额;单个 (code,year,quarter) 失败计入 failed 不中断整批;
+        配额耗尽则提前停止(置 quota_stopped)。返回 (FINANCIAL_FIELDS 列的合并面板, failed 列表)。
+        **PIT 关键:pubDate 原样保留,后续可见性对齐只能用 pubDate(见 schema.FINANCIAL_FIELDS)。**
+        """
+        self.quota_stopped = False
+        frames: "list[pd.DataFrame]" = []
+        failed: "list[tuple[str, int, int]]" = []
+        for code in codes:
+            if self.quota_stopped:
+                break
+            for year, quarter in years_quarters:
+                if self.quota is not None and self.quota.exceeded():
+                    self.quota_stopped = True
+                    logger.warning("配额接近上限,停止财务采集后续(已采 %d 行)。", len(frames))
+                    break
+                try:
+                    row = self._fetch_one_financial(code, int(year), int(quarter))
+                    if row is not None and len(row) > 0:
+                        frames.append(row)
+                except QuotaExceeded:
+                    self.quota_stopped = True
+                    logger.warning("配额耗尽,停止财务采集(已采 %d 行)。", len(frames))
+                    break
+                except Exception as e:  # noqa: BLE001 — 单个季度失败不中断整批
+                    failed.append((code, int(year), int(quarter)))
+                    logger.warning("财务采集失败 code=%s %dQ%d err=%r(已重试 %d 次)",
+                                   code, year, quarter, e, self.max_retries)
+        panel = (
+            pd.concat(frames, ignore_index=True)
+            if frames else pd.DataFrame(columns=list(FINANCIAL_FIELDS))
+        )
+        return panel, failed
+
+    def _fetch_one_financial(self, code: str, year: int, quarter: int) -> "pd.DataFrame | None":
+        """拉单个 (code,year,quarter) 的三表(各套看门狗 + 重试 + 配额),合并为一行。"""
+        profit = self._resilient_request(self.profit_fn, (code, year, quarter), cost=1)
+        growth = self._resilient_request(self.growth_fn, (code, year, quarter), cost=1)
+        balance = self._resilient_request(self.balance_fn, (code, year, quarter), cost=1)
+        return merge_financial(profit, growth, balance)

@@ -146,3 +146,44 @@ def query_stock_basic(code: str = "", code_name: str = ""):
     while rs.next():
         rows.append(rs.get_row_data())
     return pd.DataFrame(rows, columns=rs.fields)
+
+
+def _collect_rs(rs, what: str):
+    """收集 BaoStock ResultSet 为 DataFrame;error_code!=0 抛 RuntimeError(诚实失败)。"""
+    import pandas as pd
+
+    if rs.error_code != "0":
+        raise RuntimeError(f"BaoStock {what} 查询失败: {rs.error_code} {rs.error_msg}")
+    rows = []
+    while rs.next():
+        rows.append(rs.get_row_data())
+    return pd.DataFrame(rows, columns=rs.fields)
+
+
+# ── 季频财务接口(BaoStock 免费,无需 token;参数 year + quarter)──────────────
+# 每个接口都返回 pubDate(实际公告日)和 statDate(报告期);PIT 对齐只能用 pubDate。
+def query_profit(code: str, year: int, quarter: int):
+    """盈利能力(query_profit_data):含 code, pubDate, statDate, roeAvg(净资产收益率),
+    netProfit(净利润), epsTTM, npMargin 等。重型依赖惰性导入;网络路径离线 NOT RUN。"""
+    import baostock as bs
+
+    rs = bs.query_profit_data(code=code, year=int(year), quarter=int(quarter))
+    return _collect_rs(rs, f"profit {code} {year}Q{quarter}")
+
+
+def query_growth(code: str, year: int, quarter: int):
+    """成长能力(query_growth_data):含 code, pubDate, statDate, YOYNI(净利润同比),
+    YOYEquity, YOYAsset 等。"""
+    import baostock as bs
+
+    rs = bs.query_growth_data(code=code, year=int(year), quarter=int(quarter))
+    return _collect_rs(rs, f"growth {code} {year}Q{quarter}")
+
+
+def query_balance(code: str, year: int, quarter: int):
+    """偿债能力(query_balance_data):含 code, pubDate, statDate, liabilityToAsset(资产负债率),
+    currentRatio, quickRatio 等。"""
+    import baostock as bs
+
+    rs = bs.query_balance_data(code=code, year=int(year), quarter=int(quarter))
+    return _collect_rs(rs, f"balance {code} {year}Q{quarter}")
