@@ -465,3 +465,22 @@ def test_all_already_latest_returns_zero(tmp_path, caplog):
     assert rc == 0
     assert bc.calls == []                                # 全已最新 → fetch_many 一次都没调
     assert not (tmp_path / "out" / "failed_codes.json").exists()
+
+
+# ── 17) 批A×批D:已最新跳过的票不发请求 → 不消耗配额(节省配额的体现)──────────
+def test_already_latest_consumes_no_quota(tmp_path):
+    store = ParquetStore(tmp_path / "store")
+    A, B, end = "sh.600000", "sh.600001", "2024-01-10"
+    # A 本地已最新(跳过);B 新票(拉取)
+    store.write(ftd._with_null_disclosure(build_price_layers(
+        _raw(A, pd.to_datetime(["2024-01-09", "2024-01-10"])))))
+    q = RequestQuota(store.root / ".baostock_quota.json", daily_limit=1000, safety_margin=10,
+                     now_fn=_FIXED_UTC)
+    bc = ScriptedBC({B: _raw(B, pd.to_datetime(["2024-01-08", "2024-01-09", "2024-01-10"]))},
+                    quota=q, cost=2)
+    rc = ftd.run_fetch(universe_codes=[A, B], baostock_collector=bc, store=store, quota=q,
+                       enable_disclosure=False, incremental=True, end=end,
+                       batch_save_size=10, output_dir=tmp_path / "out")
+    assert rc == 0
+    # 登录1 + 仅 B 拉取2 + 登出1 = 4;A 已最新被跳过 → 零请求(否则会是 6)
+    assert q.count == 4
