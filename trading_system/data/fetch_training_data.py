@@ -72,6 +72,17 @@ def _chunked(seq: "list[str]", n: int):
         yield seq[i : i + n]
 
 
+def _start_after_end(start: "str | None", end: str) -> bool:
+    """该票增量起点是否已晚于 end(日期语义)。True ⇒ 本地已最新,无需发请求。
+
+    注意:仅 ``start > end`` 才判已最新;``start == end`` 不算(仍拉当日一天,避免漏最新一天)。
+    用日期比较(转 date),不依赖字符串格式;无 start 视为未最新(需拉)。
+    """
+    if start is None:
+        return False
+    return pd.Timestamp(start).date() > pd.Timestamp(end).date()
+
+
 def _quarters_range(start_year: int, end: "str | dt.date | None" = None) -> "list[tuple[int, int]]":
     """生成 [(start_year,1) ... (含 end 所在季)] 的 (year, quarter) 列表(季频财务采集用)。
 
@@ -278,6 +289,8 @@ def run_fetch(
     fin_written = 0                           # 季频财务采集写入行数(批 2;--enable-financials 才启用)
     fin_failed: "list" = []                   # 财务采集失败的 (code, year, quarter)
     ind_written = 0                           # 行业分类采集落盘总行数(批 4;--enable-industry 才启用)
+    already_latest: "list[str]" = []          # 增量下本地已最新(start>end)→ 跳过不发请求(批 A)
+    n_attempt = 0                             # 实际尝试采集的票数(= 总票数 − 已最新跳过)
 
     def _save_batch(panel_raw: pd.DataFrame) -> None:
         """即时落盘一批(默认主路径):双价格层 + 状态位 + 置空披露 → update_incremental。"""
@@ -313,10 +326,20 @@ def run_fetch(
             start_by_code = _start_by_code(codes, store, start, incremental)
             total = len(codes)
 
+            # 批 A:增量下本地已最新(start>end)的票直接跳过,完全不发 BaoStock 请求
+            # (否则会触发"起始>终止"报错 → 被当失败重试,白白浪费配额、刷屏、污染 failed)。
+            # 全量模式 start 固定 2019,不会 >end,自然不跳;start==end 仍拉(避免漏最新一天)。
+            already_latest = [c for c in codes if _start_after_end(start_by_code.get(c), end)]
+            fetch_codes = [c for c in codes if c not in set(already_latest)]
+            if already_latest:
+                logger.info("增量:跳过 %d 只已最新的票(start>end,不发请求,不计 failed);实际待拉 %d 只。",
+                            len(already_latest), len(fetch_codes))
+            n_attempt = len(fetch_codes)
+
             # 第一轮:分批拉取,每批落盘一次(中断不丢已落盘批次)
             pending: "list[str]" = []
-            n_batches = (total + batch_save_size - 1) // batch_save_size
-            for bi, chunk in enumerate(_chunked(codes, batch_save_size), start=1):
+            n_batches = (n_attempt + batch_save_size - 1) // batch_save_size
+            for bi, chunk in enumerate(_chunked(fetch_codes, batch_save_size), start=1):
                 panel_raw, failed = bc.fetch_many(chunk, start_by_code, end)
                 if failed:
                     pending.extend(failed)
@@ -329,7 +352,7 @@ def run_fetch(
                             quota.count, quota.limit, max(0, quota.remaining()))
                 if getattr(bc, "quota_stopped", False):    # 本批因配额耗尽提前停止
                     remaining = list(getattr(bc, "remaining_codes", [])) + \
-                        list(codes[bi * batch_save_size:])
+                        list(fetch_codes[bi * batch_save_size:])
                     deferred = sorted(set(pending) | set(remaining))
                     _write_codes_json(report_dir / PENDING_FILE, deferred,
                                       note="配额达单日上限,暂停;明日配额重置后增量重跑断点续传")
@@ -385,17 +408,17 @@ def run_fetch(
                               note="重拉后仍失败:确未拉到(非伪成功);可日后增量重跑补拉")
             shown = final_failed if len(final_failed) <= 30 else final_failed[:30] + ["...(更多见文件)"]
             logger.error("最终失败 %d/%d 只(重拉后仍失败,已写 %s):%s",
-                         len(final_failed), total, FAILED_FILE, shown)
+                         len(final_failed), n_attempt, FAILED_FILE, shown)
 
-    # ── 失败率红线(与原实现一致:全失败硬退;超阈值告警)。配额停止属优雅暂停,不计硬失败。──
+    # ── 失败率红线:分母用"实际尝试"票数(已最新跳过的不算失败,也不进分母)。──
     if not quota_stopped:
-        if total and len(final_failed) == total:
-            logger.error("整体拉取失败:%d/%d 全部失败,非零退出。", len(final_failed), total)
+        if n_attempt and len(final_failed) == n_attempt:
+            logger.error("整体拉取失败:%d/%d 全部失败,非零退出。", len(final_failed), n_attempt)
             return 2
-        if total and len(final_failed) / total > fail_rate_threshold:
+        if n_attempt and len(final_failed) / n_attempt > fail_rate_threshold:
             logger.warning("行情失败率 %.1f%% 超阈值 %.0f%%(失败 %d/%d)。",
-                           100 * len(final_failed) / total, 100 * fail_rate_threshold,
-                           len(final_failed), total)
+                           100 * len(final_failed) / n_attempt, 100 * fail_rate_threshold,
+                           len(final_failed), n_attempt)
 
     # ── 非即时落盘模式:统一双价格层 + 披露 + 一次性落盘 + 整体质检(语义同原实现)。
     #    配额提前停止时,accumulated 里已拉到的部分照常落盘,绝不丢。──
@@ -416,7 +439,8 @@ def run_fetch(
         dmins = [pd.to_datetime(panel["trade_date"]).min()]
         dmaxs = [pd.to_datetime(panel["trade_date"]).max()]
     elif not saved_any:
-        logger.info("无新增行情(增量无更新);本次不写入,退出 0。")
+        logger.info("无新增行情(增量无更新;其中 %d 只本地已最新被跳过);本次不写入,退出 0。",
+                    len(already_latest))
         if quota_stopped:
             _log_quota_stop(quota)
         return 0
@@ -433,8 +457,9 @@ def run_fetch(
     dmin = min(dmins).date() if dmins else None
     dmax = max(dmaxs).date() if dmaxs else None
     logger.info("=== 采集完成 ===")
-    logger.info("行情:成功 %d 只 / 失败 %d 只;写入 %d 行;日期 %s ~ %s。",
-                len(success_codes), len(final_failed), total_written, dmin, dmax)
+    logger.info("行情:成功 %d 只 / 已最新跳过 %d 只 / 真失败 %d 只(共 %d);写入 %d 行;日期 %s ~ %s。",
+                len(success_codes), len(already_latest), len(final_failed), total,
+                total_written, dmin, dmax)
     logger.info("披露:%s(disclosure 字段 %s)。", disclosure_status,
                 "已填充" if disclosure_status == "collected" else "NULL=未采集/未知")
     if enable_financials:

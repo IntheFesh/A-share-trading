@@ -419,3 +419,68 @@ def test_run_fetch_quota_already_exhausted_at_start(tmp_path):
     assert rc == 0
     assert bc.calls == []                                  # 没有发起任何拉取(也没登录消耗)
     assert store.read(codes=codes).empty                   # 未写入任何数据
+
+
+# ── 15) 批A:增量下"本地已最新"的票被跳过,完全不发请求、不计 failed ──────────
+def test_already_latest_skipped_no_request(tmp_path, caplog):
+    store = ParquetStore(tmp_path / "store")
+    A, B, C = "sh.600000", "sh.600001", "sh.600002"
+    end = "2024-01-10"
+    # 预置:A 本地最新到 01-10(start=01-11>end → 跳过);C 到 01-09(start==end → 仍拉);B 无本地。
+    # 注意:store.write 按年覆盖,A、C 同在 2024 年,须一次性写入(分两次 write 会相互覆盖)。
+    pre = pd.concat([
+        _raw(A, pd.to_datetime(["2024-01-08", "2024-01-09", "2024-01-10"])),
+        _raw(C, pd.to_datetime(["2024-01-08", "2024-01-09"])),
+    ], ignore_index=True)
+    store.write(ftd._with_null_disclosure(build_price_layers(pre)))
+    a_rows_before = len(store.read(codes=[A]))
+
+    panels = {B: _raw(B, pd.to_datetime(["2024-01-08", "2024-01-09", "2024-01-10"])),
+              C: _raw(C, pd.to_datetime(["2024-01-10"]))}
+    bc = ScriptedBC(panels)
+    with caplog.at_level(logging.INFO):
+        rc = ftd.run_fetch(universe_codes=[A, B, C], baostock_collector=bc, store=store,
+                           enable_disclosure=False, incremental=True, end=end,
+                           batch_save_size=10, output_dir=tmp_path / "out")
+    assert rc == 0
+    called = [c for call in bc.calls for c in call]
+    assert A not in called                               # 已最新 → 完全没发请求
+    assert B in called and C in called                   # 新票全拉 + start==end 仍拉(不漏最新一天)
+    assert not (tmp_path / "out" / "failed_codes.json").exists()   # A 不进 failed
+    assert len(store.read(codes=[A])) == a_rows_before   # A 旧数据完好(未被触碰)
+    assert any("跳过 1 只已最新" in m for m in caplog.messages)   # INFO 汇总,不逐只刷 WARNING
+
+
+# ── 16) 批A:全部已最新 → 不发任何请求、优雅退出 0 ────────────────────────────
+def test_all_already_latest_returns_zero(tmp_path, caplog):
+    store = ParquetStore(tmp_path / "store")
+    code, end = "sh.600000", "2024-01-10"
+    store.write(ftd._with_null_disclosure(build_price_layers(
+        _raw(code, pd.to_datetime(["2024-01-09", "2024-01-10"])))))
+    bc = ScriptedBC({code: _raw(code, pd.to_datetime(["2024-01-10"]))})
+    with caplog.at_level(logging.INFO):
+        rc = ftd.run_fetch(universe_codes=[code], baostock_collector=bc, store=store,
+                           enable_disclosure=False, incremental=True, end=end,
+                           batch_save_size=10, output_dir=tmp_path / "out")
+    assert rc == 0
+    assert bc.calls == []                                # 全已最新 → fetch_many 一次都没调
+    assert not (tmp_path / "out" / "failed_codes.json").exists()
+
+
+# ── 17) 批A×批D:已最新跳过的票不发请求 → 不消耗配额(节省配额的体现)──────────
+def test_already_latest_consumes_no_quota(tmp_path):
+    store = ParquetStore(tmp_path / "store")
+    A, B, end = "sh.600000", "sh.600001", "2024-01-10"
+    # A 本地已最新(跳过);B 新票(拉取)
+    store.write(ftd._with_null_disclosure(build_price_layers(
+        _raw(A, pd.to_datetime(["2024-01-09", "2024-01-10"])))))
+    q = RequestQuota(store.root / ".baostock_quota.json", daily_limit=1000, safety_margin=10,
+                     now_fn=_FIXED_UTC)
+    bc = ScriptedBC({B: _raw(B, pd.to_datetime(["2024-01-08", "2024-01-09", "2024-01-10"]))},
+                    quota=q, cost=2)
+    rc = ftd.run_fetch(universe_codes=[A, B], baostock_collector=bc, store=store, quota=q,
+                       enable_disclosure=False, incremental=True, end=end,
+                       batch_save_size=10, output_dir=tmp_path / "out")
+    assert rc == 0
+    # 登录1 + 仅 B 拉取2 + 登出1 = 4;A 已最新被跳过 → 零请求(否则会是 6)
+    assert q.count == 4
