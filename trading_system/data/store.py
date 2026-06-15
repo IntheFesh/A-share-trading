@@ -118,23 +118,19 @@ class ParquetStore:
             self._write_year(int(year), g.drop(columns="_year"))
         return len(df)
 
-    # ── 增量更新(只拉/只改新数据)──
+    # ── 增量更新(按主键去重合并;可补任意位置空洞)──
     def update_incremental(self, new_df: pd.DataFrame) -> int:
-        """按 (code, trade_date) 增量合并:每只票只接受 > 本地最新日的新行,
-        去重保留最新抓取版本,只重写受影响的年分区。返回实际新增行数。
+        """按 ``(code, trade_date)`` 主键去重合并:新日期追加、已存在日期被新版本覆盖(keep=last)、
+        **中间空洞被填补**——只重写受影响的年分区。
+
+        批 C 修复:旧实现有 ``trade_date > 本地max`` 的预过滤,会把"比本地最新日早"的新行整体砍掉,
+        导致中间年份缺失(如有 2019–2023 和 2025、缺 2024)即便重新拉回 2024 也被丢弃、空洞永远补不回。
+        现移除该预过滤,让所有新行都进入下面的"按年 concat + 主键 drop_duplicates(keep=last)"合并。
+        返回 ``appended`` = 受影响分区的**行数净增**(非"采集行数":同主键被新版本覆盖时不增,故有覆盖时偏小)。
         """
-        if new_df.empty:
+        if new_df is None or new_df.empty:
             return 0
-        local_max = self.local_max_dates()  # code -> Timestamp
-        nd = self._with_year(new_df)
-        if local_max:
-            keep = nd.apply(
-                lambda r: r["trade_date"] > local_max.get(r["code"], pd.Timestamp.min),
-                axis=1,
-            )
-            nd = nd[keep]
-        if nd.empty:
-            return 0
+        nd = self._with_year(new_df)        # 不再按 local_max 预过滤:补空洞 + 覆盖纠错的关键
         appended = 0
         for year, g in nd.groupby("_year"):
             year = int(year)
