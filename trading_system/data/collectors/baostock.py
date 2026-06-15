@@ -22,7 +22,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 # query_history_k_data_plus 日线字段(不复权/后复权同字段集);含 turn/tradestatus/isST。
-_K_FIELDS = "date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg,isST,adjustflag"
+# 批 5:追加估值字段 peTTM/pbMRQ/psTTM(alpha,仅采集落盘,进模型前需单独 RankIC/ICIR 验证)。
+_K_FIELDS = ("date,code,open,high,low,close,preclose,volume,amount,turn,tradestatus,pctChg,isST,"
+             "peTTM,pbMRQ,psTTM,adjustflag")
 
 
 def login():
@@ -67,7 +69,8 @@ def fetch_daily(code: str, start: str, end: str, adjustflag: int):
     import pandas as pd
 
     df = _query_k(code, start, end, adjustflag)
-    for col in ("open", "high", "low", "close", "preclose", "volume", "amount", "turn", "pctChg"):
+    for col in ("open", "high", "low", "close", "preclose", "volume", "amount", "turn", "pctChg",
+                "peTTM", "pbMRQ", "psTTM"):   # 批 5:估值字段一并数值化(空值 → NaN)
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     df["trade_date"] = pd.to_datetime(df["date"])
@@ -104,6 +107,10 @@ def fetch_raw_with_factor(code: str, start: str, end: str):
             "volume": merged["volume"],
             "amount": merged["amount"],
             "turn": merged["turn"] if "turn" in merged.columns else np.nan,  # 换手率(CGO/换手族)
+            # 估值字段(批 5):仅采集落盘,进模型前需单独 RankIC/ICIR 验证;当前无因子引用。无值置 NaN。
+            "peTTM": merged["peTTM"] if "peTTM" in merged.columns else np.nan,
+            "pbMRQ": merged["pbMRQ"] if "pbMRQ" in merged.columns else np.nan,
+            "psTTM": merged["psTTM"] if "psTTM" in merged.columns else np.nan,
             "adj_factor": factor,
             # PIT 历史 ST 状态:决定 5% 涨跌停(build_price_layers 会用到 is_st)
             "is_st": (merged["isST"].astype(str) == "1") if "isST" in merged.columns else False,

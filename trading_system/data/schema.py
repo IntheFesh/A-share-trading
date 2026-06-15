@@ -27,8 +27,13 @@ ADJ_PRICE_FIELDS: tuple[str, ...] = (
     "close_adj",
 )
 
-# 特征层附加列(换手率;来自 BaoStock 日线,服务换手率族与 CGO 族)。无来源时为 NaN。
-FEATURE_EXTRA_FIELDS: tuple[str, ...] = ("turn",)
+# 特征层附加列(来自 BaoStock 日线)。无来源时为 NaN。
+#  - turn:换手率,服务换手率族与 CGO 族(已接入)。
+#  - peTTM / pbMRQ / psTTM:估值字段(批 5,alpha 采集)。**仅采集落盘备用,进模型前需单独
+#    RankIC/ICIR 验证**(用户纪律:alpha 因子排队验证,默认不臃肿);当前无任何因子引用它们。
+FEATURE_EXTRA_FIELDS: tuple[str, ...] = ("turn", "peTTM", "pbMRQ", "psTTM")
+# 估值字段(批 5):仅采集,未接入打分。单列出来便于"哪些是待验证 alpha"一目了然。
+VALUATION_FIELDS: tuple[str, ...] = ("peTTM", "pbMRQ", "psTTM")
 
 # 状态位
 STATE_FIELDS: tuple[str, ...] = (
